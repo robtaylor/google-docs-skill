@@ -565,6 +565,179 @@ class DocsManager
     exit EXIT_OPERATION_FAILED
   end
 
+  # Insert a table into a document
+  def insert_table(document_id:, rows:, cols:, index: nil, data: nil)
+    # Get document to find insertion point if not specified
+    if index.nil?
+      document = @docs_service.get_document(document_id)
+      index = document.body.content.last.end_index - 1
+    end
+
+    # Create the table
+    insert_requests = [
+      {
+        insert_table: {
+          rows: rows,
+          columns: cols,
+          location: { index: index }
+        }
+      }
+    ]
+
+    @docs_service.batch_update_document(
+      document_id,
+      Google::Apis::DocsV1::BatchUpdateDocumentRequest.new(requests: insert_requests)
+    )
+
+    # If data provided, populate the table cells
+    if data && data.length > 0
+      # Re-read document to get table structure
+      document = @docs_service.get_document(document_id)
+
+      # Find the table we just inserted (it should be near our index)
+      table_element = nil
+      document.body.content.each do |element|
+        if element.table && element.start_index >= index
+          table_element = element
+          break
+        end
+      end
+
+      if table_element
+        # Populate cells in reverse order to preserve indices
+        cell_requests = []
+        data.reverse.each_with_index do |row_data, rev_row_idx|
+          row_idx = data.length - 1 - rev_row_idx
+          next if row_idx >= rows
+
+          row_data.reverse.each_with_index do |cell_content, rev_col_idx|
+            col_idx = row_data.length - 1 - rev_col_idx
+            next if col_idx >= cols
+
+            # Get the cell's content index
+            table_row = table_element.table.table_rows[row_idx]
+            next unless table_row
+
+            table_cell = table_row.table_cells[col_idx]
+            next unless table_cell
+
+            # Cell content starts after the cell's structural element
+            cell_start = table_cell.content.first.start_index
+
+            cell_requests << {
+              insert_text: {
+                location: { index: cell_start },
+                text: cell_content.to_s
+              }
+            }
+          end
+        end
+
+        unless cell_requests.empty?
+          @docs_service.batch_update_document(
+            document_id,
+            Google::Apis::DocsV1::BatchUpdateDocumentRequest.new(requests: cell_requests)
+          )
+        end
+      end
+    end
+
+    output_json({
+      status: 'success',
+      operation: 'insert_table',
+      document_id: document_id,
+      rows: rows,
+      columns: cols,
+      inserted_at: index
+    })
+  rescue Google::Apis::Error => e
+    output_json({
+      status: 'error',
+      error_code: 'API_ERROR',
+      operation: 'insert_table',
+      message: "Google Docs API error: #{e.message}"
+    })
+    exit EXIT_API_ERROR
+  rescue StandardError => e
+    output_json({
+      status: 'error',
+      error_code: 'INSERT_TABLE_FAILED',
+      operation: 'insert_table',
+      message: "Failed to insert table: #{e.message}"
+    })
+    exit EXIT_OPERATION_FAILED
+  end
+
+  # Internal table insertion (no JSON output, for use within other methods)
+  def insert_table_internal(document_id:, rows:, cols:, index:, data: nil)
+    # Create the table
+    insert_requests = [
+      {
+        insert_table: {
+          rows: rows,
+          columns: cols,
+          location: { index: index }
+        }
+      }
+    ]
+
+    @docs_service.batch_update_document(
+      document_id,
+      Google::Apis::DocsV1::BatchUpdateDocumentRequest.new(requests: insert_requests)
+    )
+
+    # If data provided, populate the table cells
+    return unless data && data.length > 0
+
+    # Re-read document to get table structure
+    document = @docs_service.get_document(document_id)
+
+    # Find the table we just inserted
+    table_element = nil
+    document.body.content.each do |element|
+      if element.table && element.start_index >= index
+        table_element = element
+        break
+      end
+    end
+
+    return unless table_element
+
+    # Populate cells in reverse order to preserve indices
+    cell_requests = []
+    data.reverse.each_with_index do |row_data, rev_row_idx|
+      row_idx = data.length - 1 - rev_row_idx
+      next if row_idx >= rows
+
+      row_data.reverse.each_with_index do |cell_content, rev_col_idx|
+        col_idx = row_data.length - 1 - rev_col_idx
+        next if col_idx >= cols
+
+        table_row = table_element.table.table_rows[row_idx]
+        next unless table_row
+
+        table_cell = table_row.table_cells[col_idx]
+        next unless table_cell
+
+        cell_start = table_cell.content.first.start_index
+
+        cell_requests << {
+          insert_text: {
+            location: { index: cell_start },
+            text: cell_content.to_s
+          }
+        }
+      end
+    end
+
+    unless cell_requests.empty?
+      @docs_service.batch_update_document(
+        document_id,
+        Google::Apis::DocsV1::BatchUpdateDocumentRequest.new(requests: cell_requests)
+      )
+    end
+  end
+
   # Create document from markdown with proper formatting
   def create_from_markdown(title:, markdown:)
     # Create document first
@@ -604,12 +777,25 @@ class DocsManager
       )
     end
 
+    # Insert tables (in reverse order to preserve indices)
+    tables = parsed[:tables] || []
+    tables.reverse.each do |table_info|
+      insert_table_internal(
+        document_id: document_id,
+        rows: table_info[:num_rows],
+        cols: table_info[:num_cols],
+        index: table_info[:insert_index],
+        data: table_info[:rows]
+      )
+    end
+
     output_json({
       status: 'success',
       operation: 'create_from_markdown',
       document_id: document_id,
       title: title,
-      revision_id: result.revision_id
+      revision_id: result.revision_id,
+      tables_inserted: tables.length
     })
   rescue Google::Apis::Error => e
     output_json({
@@ -629,12 +815,90 @@ class DocsManager
     exit EXIT_OPERATION_FAILED
   end
 
+  # Insert markdown with proper formatting into existing document
+  def insert_from_markdown(document_id:, markdown:, index: nil)
+    # If no index provided, append to end
+    if index.nil?
+      document = @docs_service.get_document(document_id)
+      index = document.body.content.last.end_index - 1
+    end
+
+    # Parse markdown and build formatted content
+    parsed = parse_markdown(markdown)
+
+    # Insert plain text first
+    plain_text = parsed[:text]
+    unless plain_text.empty?
+      insert_requests = [
+        {
+          insert_text: {
+            location: { index: index },
+            text: plain_text
+          }
+        }
+      ]
+      @docs_service.batch_update_document(
+        document_id,
+        Google::Apis::DocsV1::BatchUpdateDocumentRequest.new(requests: insert_requests)
+      )
+    end
+
+    # Adjust format indices to account for insertion point
+    # (parse_markdown assumes starting at index 1, we need to offset by actual index - 1)
+    offset = index - 1
+    adjusted_formats = parsed[:formats].map do |fmt|
+      {
+        type: fmt[:type],
+        start: fmt[:start] + offset,
+        end: fmt[:end] + offset
+      }
+    end
+
+    # Apply formatting (must be done in reverse order to preserve indices)
+    format_requests = adjusted_formats.reverse.map do |fmt|
+      build_format_request(fmt)
+    end.compact
+
+    unless format_requests.empty?
+      @docs_service.batch_update_document(
+        document_id,
+        Google::Apis::DocsV1::BatchUpdateDocumentRequest.new(requests: format_requests)
+      )
+    end
+
+    output_json({
+      status: 'success',
+      operation: 'insert_from_markdown',
+      document_id: document_id,
+      inserted_at: index,
+      text_length: plain_text.length,
+      formats_applied: parsed[:formats].length
+    })
+  rescue Google::Apis::Error => e
+    output_json({
+      status: 'error',
+      error_code: 'API_ERROR',
+      operation: 'insert_from_markdown',
+      message: "Google Docs API error: #{e.message}"
+    })
+    exit EXIT_API_ERROR
+  rescue StandardError => e
+    output_json({
+      status: 'error',
+      error_code: 'INSERT_MARKDOWN_FAILED',
+      operation: 'insert_from_markdown',
+      message: "Failed to insert markdown: #{e.message}"
+    })
+    exit EXIT_OPERATION_FAILED
+  end
+
   private
 
   # Parse markdown and return plain text with formatting info
   def parse_markdown(markdown)
     text = ''
     formats = []
+    tables = []
     current_index = 1  # Google Docs starts at index 1
 
     lines = markdown.lines
@@ -660,20 +924,74 @@ class DocsManager
         formats << { type: :heading3, start: current_index, end: current_index + heading_text.length - 1 }
         text += heading_text
         current_index += heading_text.length
-      elsif line.start_with?('- ') || line.start_with?('* ')
-        # Bullet list item
-        item_text = '• ' + line[2..] + "\n"
+      elsif line.start_with?('- [ ] ') || line.start_with?('* [ ] ')
+        # Unchecked checkbox item
+        item_content = line[6..]
+        bullet_prefix = '☐ '
+        processed = process_inline_formatting(item_content, current_index + bullet_prefix.length, formats)
+        item_text = bullet_prefix + processed[:text] + "\n"
         text += item_text
         current_index += item_text.length
-      elsif line.match?(/^\d+\. /)
-        # Numbered list item - keep as-is
-        text += line + "\n"
-        current_index += line.length + 1
+      elsif line.start_with?('- [x] ') || line.start_with?('* [x] ') || line.start_with?('- [X] ') || line.start_with?('* [X] ')
+        # Checked checkbox item
+        item_content = line[6..]
+        bullet_prefix = '☑ '
+        processed = process_inline_formatting(item_content, current_index + bullet_prefix.length, formats)
+        item_text = bullet_prefix + processed[:text] + "\n"
+        text += item_text
+        current_index += item_text.length
+      elsif line.start_with?('- ') || line.start_with?('* ')
+        # Bullet list item - also process inline formatting
+        item_content = line[2..]
+        bullet_prefix = '• '
+        processed = process_inline_formatting(item_content, current_index + bullet_prefix.length, formats)
+        item_text = bullet_prefix + processed[:text] + "\n"
+        text += item_text
+        current_index += item_text.length
+      elsif line.match?(/^(\d+)\. (.*)$/)
+        # Numbered list item - process inline formatting
+        match = line.match(/^(\d+)\. (.*)$/)
+        num_prefix = match[1] + '. '
+        item_content = match[2]
+        processed = process_inline_formatting(item_content, current_index + num_prefix.length, formats)
+        item_text = num_prefix + processed[:text] + "\n"
+        text += item_text
+        current_index += item_text.length
       elsif line == '---'
         # Horizontal rule - use em dash line
         rule_text = "———————————————————————————\n"
         text += rule_text
         current_index += rule_text.length
+      elsif line.start_with?('|') && line.end_with?('|')
+        # Markdown table - collect all table rows
+        table_rows = []
+        while i < lines.length
+          current_line = lines[i].rstrip
+          break unless current_line.start_with?('|') && current_line.end_with?('|')
+
+          # Parse cells from the line
+          cells = current_line[1..-2].split('|').map(&:strip)
+
+          # Skip separator lines (|---|---|)
+          unless cells.all? { |c| c.match?(/^[-:]+$/) }
+            table_rows << cells
+          end
+          i += 1
+        end
+        i -= 1  # Back up one since the outer loop will increment
+
+        # Store table with position info
+        if table_rows.length > 0
+          tables << {
+            rows: table_rows,
+            insert_index: current_index,
+            num_rows: table_rows.length,
+            num_cols: table_rows.first&.length || 0
+          }
+          # Add a placeholder newline for the table
+          text += "\n"
+          current_index += 1
+        end
       elsif line.empty?
         # Empty line
         text += "\n"
@@ -689,7 +1007,7 @@ class DocsManager
       i += 1
     end
 
-    { text: text, formats: formats }
+    { text: text, formats: formats, tables: tables }
   end
 
   # Process inline markdown formatting (**bold**, *italic*, `code`)
@@ -865,7 +1183,10 @@ def usage
       format                   Format text (bold, italic, underline) (JSON via stdin)
       page-break               Insert page break (JSON via stdin)
       create                   Create new document (JSON via stdin)
+      create-from-markdown     Create new document from markdown (JSON via stdin)
+      insert-from-markdown     Insert formatted markdown into existing doc (JSON via stdin)
       delete                   Delete content range (JSON via stdin)
+      insert-image             Insert inline image from URL (JSON via stdin)
 
     JSON Input Formats:
 
@@ -1135,6 +1456,24 @@ if __FILE__ == $PROGRAM_NAME
       markdown: input[:markdown]
     )
 
+  when 'insert-from-markdown'
+    input = JSON.parse(STDIN.read, symbolize_names: true)
+
+    unless input[:document_id] && input[:markdown]
+      puts JSON.pretty_generate({
+        status: 'error',
+        error_code: 'MISSING_REQUIRED_FIELDS',
+        message: 'Required fields: document_id, markdown'
+      })
+      exit DocsManager::EXIT_INVALID_ARGS
+    end
+
+    manager.insert_from_markdown(
+      document_id: input[:document_id],
+      markdown: input[:markdown],
+      index: input[:index]
+    )
+
   when 'delete'
     input = JSON.parse(STDIN.read, symbolize_names: true)
 
@@ -1173,12 +1512,32 @@ if __FILE__ == $PROGRAM_NAME
       height: input[:height]
     )
 
+  when 'insert-table'
+    input = JSON.parse(STDIN.read, symbolize_names: true)
+
+    unless input[:document_id] && input[:rows] && input[:cols]
+      puts JSON.pretty_generate({
+        status: 'error',
+        error_code: 'MISSING_REQUIRED_FIELDS',
+        message: 'Required fields: document_id, rows, cols'
+      })
+      exit DocsManager::EXIT_INVALID_ARGS
+    end
+
+    manager.insert_table(
+      document_id: input[:document_id],
+      rows: input[:rows],
+      cols: input[:cols],
+      index: input[:index],
+      data: input[:data]
+    )
+
   else
     puts JSON.pretty_generate({
       status: 'error',
       error_code: 'INVALID_COMMAND',
       message: "Unknown command: #{command}",
-      valid_commands: ['auth', 'read', 'structure', 'insert', 'append', 'replace', 'format', 'page-break', 'create', 'create-from-markdown', 'delete', 'insert-image']
+      valid_commands: ['auth', 'read', 'structure', 'insert', 'append', 'replace', 'format', 'page-break', 'create', 'create-from-markdown', 'insert-from-markdown', 'delete', 'insert-image']
     })
     usage
     exit DocsManager::EXIT_INVALID_ARGS

@@ -1,10 +1,10 @@
 ---
 name: google-docs
-description: Manage Google Docs and Google Drive with full document operations and file management. Includes document reading, editing, formatting, and Drive operations (upload, download, share, search). Use for document content operations, Drive file management, and integration with other Google services.
+description: Manage Google Docs and Google Drive with full document operations and file management. Includes Markdown support for creating formatted documents with headings, bold, italic, lists, tables, and checkboxes. Also supports Drive operations (upload, download, share, search).
 category: productivity
-version: 1.1.0
-key_capabilities: read content, insert/append/replace text, format text, Drive upload/download/share/search
-when_to_use: Document content operations, text insertion/replacement, formatting, Drive file management, sharing files
+version: 1.2.0
+key_capabilities: create-from-markdown, insert-from-markdown, tables, formatted text, Drive upload/download/share/search
+when_to_use: Document content operations, formatted document creation from Markdown, tables, Drive file management, sharing files
 ---
 
 # Google Docs & Drive Management Skill
@@ -85,20 +85,32 @@ scripts/docs_manager.rb structure <document_id>
 
 ### 2. Create Documents
 
-**Create new document**:
+**Create new document (plain text)**:
 ```bash
 echo '{
   "title": "Project Proposal",
-  "content": "# Project Proposal\n\nIntroduction text here..."
+  "content": "Initial plain text content..."
 }' | scripts/docs_manager.rb create
 ```
 
-**Create empty document**:
+**Create document from Markdown (RECOMMENDED)**:
 ```bash
 echo '{
-  "title": "New Document"
-}' | scripts/docs_manager.rb create
+  "title": "Project Proposal",
+  "markdown": "# Project Proposal\n\n## Overview\n\nThis is **bold** and *italic* text.\n\n- Bullet point 1\n- Bullet point 2\n\n| Column 1 | Column 2 |\n|----------|----------|\n| Data 1   | Data 2   |"
+}' | scripts/docs_manager.rb create-from-markdown
 ```
+
+**Supported Markdown Features**:
+- Headings: `#`, `##`, `###` → Google Docs HEADING_1, HEADING_2, HEADING_3
+- Bold: `**text**`
+- Italic: `*text*`
+- Code: `` `text` `` → Courier New with grey background
+- Bullet lists: `- item` or `* item`
+- Numbered lists: `1. item`
+- Checkboxes: `- [ ] unchecked` and `- [x] checked`
+- Horizontal rules: `---`
+- Tables: `| col1 | col2 |` (with separator row)
 
 **Document ID**:
 - Returned in response for future operations
@@ -106,13 +118,22 @@ echo '{
 
 ### 3. Insert and Append Text
 
-**Insert text at specific position**:
+**Insert plain text at specific position**:
 ```bash
 echo '{
   "document_id": "abc123",
   "text": "This text will be inserted at the beginning.\n\n",
   "index": 1
 }' | scripts/docs_manager.rb insert
+```
+
+**Insert formatted Markdown (RECOMMENDED)**:
+```bash
+echo '{
+  "document_id": "abc123",
+  "markdown": "## New Section\n\nThis has **bold** and *italic* formatting.\n\n- Item 1\n- Item 2",
+  "index": 1
+}' | scripts/docs_manager.rb insert-from-markdown
 ```
 
 **Append text to end of document**:
@@ -128,6 +149,7 @@ echo '{
 - Use `read` command to see current content
 - Use `structure` command to find heading positions
 - End of document: use `append` instead of calculating index
+- For `insert-from-markdown`, omit index to append at end
 
 ### 4. Find and Replace
 
@@ -264,6 +286,49 @@ echo '{
 - Specifying only width will auto-scale height proportionally
 - Specifying only height will auto-scale width proportionally
 - 1 inch = 72 points
+
+### 9. Insert Tables
+
+**Insert empty table**:
+```bash
+echo '{
+  "document_id": "abc123",
+  "rows": 3,
+  "cols": 4
+}' | scripts/docs_manager.rb insert-table
+```
+
+**Insert table with data**:
+```bash
+echo '{
+  "document_id": "abc123",
+  "rows": 3,
+  "cols": 2,
+  "data": [
+    ["Header 1", "Header 2"],
+    ["Row 1 Col 1", "Row 1 Col 2"],
+    ["Row 2 Col 1", "Row 2 Col 2"]
+  ]
+}' | scripts/docs_manager.rb insert-table
+```
+
+**Insert table at specific position**:
+```bash
+echo '{
+  "document_id": "abc123",
+  "rows": 2,
+  "cols": 3,
+  "index": 100,
+  "data": [["A", "B", "C"], ["1", "2", "3"]]
+}' | scripts/docs_manager.rb insert-table
+```
+
+**Note**: Tables can also be created via Markdown in `create-from-markdown`:
+```markdown
+| Column 1 | Column 2 | Column 3 |
+|----------|----------|----------|
+| Data 1   | Data 2   | Data 3   |
+```
 
 ## Natural Language Examples
 
@@ -514,13 +579,17 @@ For creating and managing Excalidraw diagrams, see the `excalidraw-diagrams` ski
 **Operations**:
 - `read`: View document content
 - `structure`: Get document headings and structure
-- `insert`: Insert text at specific index
+- `insert`: Insert plain text at specific index
+- `insert-from-markdown`: Insert formatted markdown content
 - `append`: Append text to end
 - `replace`: Find and replace text
 - `format`: Apply text formatting (bold, italic, underline)
 - `page-break`: Insert page break
-- `create`: Create new document
+- `create`: Create new document (plain text)
+- `create-from-markdown`: Create document with formatted markdown
 - `delete`: Delete content range
+- `insert-image`: Insert inline image from URL
+- `insert-table`: Insert table with optional data
 
 **Output Format**:
 - JSON with `status: 'success'` or `status: 'error'`
@@ -631,12 +700,22 @@ For creating and managing Excalidraw diagrams, see the `excalidraw-diagrams` ski
 scripts/docs_manager.rb read <document_id>
 ```
 
-**Create document**:
+**Create document from Markdown (RECOMMENDED)**:
+```bash
+echo '{"title":"My Doc","markdown":"# Heading\n\nParagraph with **bold**."}' | scripts/docs_manager.rb create-from-markdown
+```
+
+**Create document (plain text)**:
 ```bash
 echo '{"title":"My Doc","content":"Initial text"}' | scripts/docs_manager.rb create
 ```
 
-**Insert text at beginning**:
+**Insert formatted Markdown**:
+```bash
+echo '{"document_id":"abc123","markdown":"## Section\n\n- Item 1\n- Item 2"}' | scripts/docs_manager.rb insert-from-markdown
+```
+
+**Insert plain text at beginning**:
 ```bash
 echo '{"document_id":"abc123","text":"New text","index":1}' | scripts/docs_manager.rb insert
 ```
@@ -661,58 +740,52 @@ echo '{"document_id":"abc123","start_index":1,"end_index":50,"bold":true}' | scr
 scripts/docs_manager.rb structure <document_id>
 ```
 
+**Insert table**:
+```bash
+echo '{"document_id":"abc123","rows":3,"cols":2,"data":[["A","B"],["1","2"],["3","4"]]}' | scripts/docs_manager.rb insert-table
+```
+
 **Insert image from URL**:
 ```bash
 echo '{"document_id":"abc123","image_url":"https://example.com/image.png"}' | scripts/docs_manager.rb insert-image
 ```
 
-**Insert image with size**:
-```bash
-echo '{"document_id":"abc123","image_url":"https://example.com/image.png","width":400,"height":300}' | scripts/docs_manager.rb insert-image
-```
-
 ## Example Workflow: Creating and Editing a Report
 
-1. **Create document**:
+1. **Create document with formatted content**:
    ```bash
-   echo '{"title":"Q4 Report"}' | scripts/docs_manager.rb create
+   echo '{
+     "title": "Q4 Report",
+     "markdown": "# Q4 Report\n\n## Executive Summary\n\nRevenue increased **25%** over Q3 targets.\n\n## Key Metrics\n\n| Metric | Q3 | Q4 |\n|--------|-----|-----|\n| Revenue | $1M | $1.25M |\n| Users | 10K | 15K |\n\n## Next Steps\n\n- [ ] Finalize budget\n- [ ] Schedule review meeting\n- [x] Complete analysis"
+   }' | scripts/docs_manager.rb create-from-markdown
    # Returns: {"document_id": "abc123"}
    ```
 
-2. **Add initial content**:
+2. **Add more content later**:
    ```bash
    echo '{
      "document_id": "abc123",
-     "text": "# Q4 Report\n\n## Executive Summary\n\nPlaceholder for summary.\n\n## Details\n\nPlaceholder for details."
-   }' | scripts/docs_manager.rb insert
+     "markdown": "\n\n## Appendix\n\nAdditional *details* and **notes** here."
+   }' | scripts/docs_manager.rb insert-from-markdown
    ```
 
-3. **Replace placeholders**:
+3. **Replace text if needed**:
    ```bash
    echo '{
      "document_id": "abc123",
-     "find": "Placeholder for summary.",
-     "replace": "Revenue increased 25% over Q3 targets."
+     "find": "Q3",
+     "replace": "Q4"
    }' | scripts/docs_manager.rb replace
    ```
 
-4. **Format heading**:
-   ```bash
-   echo '{
-     "document_id": "abc123",
-     "start_index": 1,
-     "end_index": 12,
-     "bold": true
-   }' | scripts/docs_manager.rb format
-   ```
-
-5. **Share with team**:
+4. **Share with team**:
    ```bash
    scripts/drive_manager.rb share --file-id abc123 --email team@company.com --role writer
    ```
 
 ## Version History
 
+- **1.2.0** (2025-12-25) - Added markdown support documentation: `create-from-markdown`, `insert-from-markdown`, `insert-table` commands. Supports headings, bold, italic, code, lists, checkboxes, tables, and horizontal rules.
 - **1.1.0** (2025-12-20) - Added Google Drive operations via drive_manager.rb: upload, download, search, list, share, move, copy, delete, folder management. Integrated with excalidraw-diagrams skill for diagram workflows.
 - **1.0.0** (2025-11-10) - Initial Google Docs skill with full document operations: read, create, insert, append, replace, format, page breaks, structure analysis. Shared OAuth token with email, calendar, contacts, drive, and sheets skills.
 
