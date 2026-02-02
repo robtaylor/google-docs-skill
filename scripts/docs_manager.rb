@@ -12,8 +12,9 @@ require 'fileutils'
 require 'json'
 
 # Google Docs Manager - Google CLI Integration for Document Operations
-# Version: 1.0.0
+# Version: 1.1.0
 # Scopes: Docs, Drive, Calendar, Contacts, Gmail
+# Features: Document tabs support
 class DocsManager
   # OAuth scopes - ALL Google skills share these
   DOCS_SCOPE = Google::Apis::DocsV1::AUTH_DOCUMENTS
@@ -59,7 +60,7 @@ class DocsManager
     credentials = authorizer.get_credentials(user_id)
 
     if credentials.nil?
-      url = authorizer.get_authorization_url(base_url: 'urn:ietf:wg:oauth:2.0:oob')
+      url = authorizer.get_authorization_url(base_url: 'http://localhost')
       output_json({
         status: 'error',
         error_code: 'AUTH_REQUIRED',
@@ -95,7 +96,7 @@ class DocsManager
     credentials = authorizer.get_and_store_credentials_from_code(
       user_id: user_id,
       code: code,
-      base_url: 'urn:ietf:wg:oauth:2.0:oob'
+      base_url: 'http://localhost'
     )
 
     output_json({
@@ -113,21 +114,102 @@ class DocsManager
     exit EXIT_AUTH_ERROR
   end
 
-  # Read document content
-  def read_document(document_id:)
-    document = @docs_service.get_document(document_id)
+  # List all tabs in a document
+  def list_tabs(document_id:)
+    document = @docs_service.get_document(document_id, include_tabs_content: true)
 
-    # Extract text content
-    content = extract_text_content(document.body.content)
+    tabs_info = []
+    if document.tabs && !document.tabs.empty?
+      document.tabs.each_with_index do |tab, idx|
+        props = tab.tab_properties
+        tabs_info << {
+          index: idx + 1,
+          tab_id: props&.tab_id,
+          title: props&.title || '(untitled)',
+          nested_tab_count: tab.child_tabs&.length || 0
+        }
+        # Also include nested/child tabs if any
+        if tab.child_tabs && !tab.child_tabs.empty?
+          tab.child_tabs.each_with_index do |child_tab, child_idx|
+            child_props = child_tab.tab_properties
+            tabs_info << {
+              index: "#{idx + 1}.#{child_idx + 1}",
+              tab_id: child_props&.tab_id,
+              title: child_props&.title || '(untitled)',
+              parent_tab_id: props&.tab_id
+            }
+          end
+        end
+      end
+    end
 
     output_json({
+      status: 'success',
+      operation: 'list_tabs',
+      document_id: document.document_id,
+      title: document.title,
+      tab_count: tabs_info.length,
+      tabs: tabs_info
+    })
+  rescue Google::Apis::Error => e
+    output_json({
+      status: 'error',
+      error_code: 'API_ERROR',
+      operation: 'list_tabs',
+      message: "Google Docs API error: #{e.message}",
+      details: e.body
+    })
+    exit EXIT_API_ERROR
+  rescue StandardError => e
+    output_json({
+      status: 'error',
+      error_code: 'LIST_TABS_FAILED',
+      operation: 'list_tabs',
+      message: "Failed to list tabs: #{e.message}"
+    })
+    exit EXIT_OPERATION_FAILED
+  end
+
+  # Read document content (optionally from a specific tab)
+  def read_document(document_id:, tab_id: nil)
+    # If tab_id specified, fetch with tabs content
+    if tab_id
+      document = @docs_service.get_document(document_id, include_tabs_content: true)
+      tab = find_tab_by_id(document, tab_id)
+
+      unless tab
+        output_json({
+          status: 'error',
+          error_code: 'TAB_NOT_FOUND',
+          operation: 'read',
+          message: "Tab with ID '#{tab_id}' not found in document"
+        })
+        exit EXIT_OPERATION_FAILED
+      end
+
+      body_content = tab.document_tab&.body&.content
+      tab_title = tab.tab_properties&.title || '(untitled)'
+    else
+      document = @docs_service.get_document(document_id)
+      body_content = document.body.content
+      tab_title = nil
+    end
+
+    # Extract text content
+    content = extract_text_content(body_content)
+
+    result = {
       status: 'success',
       operation: 'read',
       document_id: document.document_id,
       title: document.title,
       content: content,
       revision_id: document.revision_id
-    })
+    }
+    result[:tab_id] = tab_id if tab_id
+    result[:tab_title] = tab_title if tab_title
+
+    output_json(result)
   rescue Google::Apis::Error => e
     output_json({
       status: 'error',
@@ -147,12 +229,33 @@ class DocsManager
     exit EXIT_OPERATION_FAILED
   end
 
-  # Get document structure (headings, sections)
-  def get_structure(document_id:)
-    document = @docs_service.get_document(document_id)
+  # Get document structure (headings, sections) - optionally from a specific tab
+  def get_structure(document_id:, tab_id: nil)
+    # If tab_id specified, fetch with tabs content
+    if tab_id
+      document = @docs_service.get_document(document_id, include_tabs_content: true)
+      tab = find_tab_by_id(document, tab_id)
+
+      unless tab
+        output_json({
+          status: 'error',
+          error_code: 'TAB_NOT_FOUND',
+          operation: 'structure',
+          message: "Tab with ID '#{tab_id}' not found in document"
+        })
+        exit EXIT_OPERATION_FAILED
+      end
+
+      body_content = tab.document_tab&.body&.content || []
+      tab_title = tab.tab_properties&.title || '(untitled)'
+    else
+      document = @docs_service.get_document(document_id)
+      body_content = document.body.content
+      tab_title = nil
+    end
 
     structure = []
-    document.body.content.each do |element|
+    body_content.each do |element|
       next unless element.paragraph
 
       paragraph = element.paragraph
@@ -171,13 +274,17 @@ class DocsManager
       end
     end
 
-    output_json({
+    result = {
       status: 'success',
       operation: 'structure',
       document_id: document.document_id,
       title: document.title,
       structure: structure
-    })
+    }
+    result[:tab_id] = tab_id if tab_id
+    result[:tab_title] = tab_title if tab_title
+
+    output_json(result)
   rescue Google::Apis::Error => e
     output_json({
       status: 'error',
@@ -894,6 +1001,24 @@ class DocsManager
 
   private
 
+  # Find a tab by its ID (searches top-level and nested tabs)
+  def find_tab_by_id(document, tab_id)
+    return nil unless document.tabs
+
+    document.tabs.each do |tab|
+      return tab if tab.tab_properties&.tab_id == tab_id
+
+      # Check child/nested tabs
+      if tab.child_tabs
+        tab.child_tabs.each do |child_tab|
+          return child_tab if child_tab.tab_properties&.tab_id == tab_id
+        end
+      end
+    end
+
+    nil
+  end
+
   # Parse markdown and return plain text with formatting info
   def parse_markdown(markdown)
     text = ''
@@ -1168,15 +1293,18 @@ end
 def usage
   puts <<~USAGE
     Google Docs Manager - Document Operations CLI
-    Version: 1.0.0
+    Version: 1.1.0
 
     Usage:
       #{File.basename($PROGRAM_NAME)} <command> [options]
 
     Commands:
       auth <code>              Complete OAuth authorization with code
-      read <document_id>       Read document content
-      structure <document_id>  Get document structure (headings)
+      list-tabs <document_id>  List all tabs in a document
+      read <document_id> [--tab-id <tab_id>]
+                               Read document content (optionally from specific tab)
+      structure <document_id> [--tab-id <tab_id>]
+                               Get document structure (optionally from specific tab)
       insert                   Insert text at specific index (JSON via stdin)
       append                   Append text to end of document (JSON via stdin)
       replace                  Find and replace text (JSON via stdin)
@@ -1244,11 +1372,20 @@ def usage
       # Complete OAuth authorization
       #{File.basename($PROGRAM_NAME)} auth YOUR_AUTH_CODE
 
-      # Read document
+      # List tabs in a document
+      #{File.basename($PROGRAM_NAME)} list-tabs 1abc-xyz-123
+
+      # Read document (first tab by default)
       #{File.basename($PROGRAM_NAME)} read 1abc-xyz-123
+
+      # Read specific tab by ID
+      #{File.basename($PROGRAM_NAME)} read 1abc-xyz-123 --tab-id t.abc123
 
       # Get document structure
       #{File.basename($PROGRAM_NAME)} structure 1abc-xyz-123
+
+      # Get structure of specific tab
+      #{File.basename($PROGRAM_NAME)} structure 1abc-xyz-123 --tab-id t.abc123
 
       # Insert text
       echo '{"document_id":"abc123","text":"Hello World","index":1}' | #{File.basename($PROGRAM_NAME)} insert
@@ -1304,7 +1441,29 @@ if __FILE__ == $PROGRAM_NAME
   # For all other commands, create manager (which requires authorization)
   manager = DocsManager.new
 
+  # Helper to parse --tab-id option
+  def self.parse_tab_id(args)
+    tab_id_idx = args.index('--tab-id')
+    if tab_id_idx && args[tab_id_idx + 1]
+      args[tab_id_idx + 1]
+    else
+      nil
+    end
+  end
+
   case command
+
+  when 'list-tabs'
+    if ARGV.length < 2
+      puts JSON.pretty_generate({
+        status: 'error',
+        error_code: 'MISSING_DOCUMENT_ID',
+        message: 'Document ID required'
+      })
+      exit DocsManager::EXIT_INVALID_ARGS
+    end
+
+    manager.list_tabs(document_id: ARGV[1])
 
   when 'read'
     if ARGV.length < 2
@@ -1316,7 +1475,8 @@ if __FILE__ == $PROGRAM_NAME
       exit DocsManager::EXIT_INVALID_ARGS
     end
 
-    manager.read_document(document_id: ARGV[1])
+    tab_id = parse_tab_id(ARGV)
+    manager.read_document(document_id: ARGV[1], tab_id: tab_id)
 
   when 'structure'
     if ARGV.length < 2
@@ -1328,7 +1488,8 @@ if __FILE__ == $PROGRAM_NAME
       exit DocsManager::EXIT_INVALID_ARGS
     end
 
-    manager.get_structure(document_id: ARGV[1])
+    tab_id = parse_tab_id(ARGV)
+    manager.get_structure(document_id: ARGV[1], tab_id: tab_id)
 
   when 'insert'
     input = JSON.parse(STDIN.read, symbolize_names: true)
@@ -1537,7 +1698,7 @@ if __FILE__ == $PROGRAM_NAME
       status: 'error',
       error_code: 'INVALID_COMMAND',
       message: "Unknown command: #{command}",
-      valid_commands: ['auth', 'read', 'structure', 'insert', 'append', 'replace', 'format', 'page-break', 'create', 'create-from-markdown', 'insert-from-markdown', 'delete', 'insert-image']
+      valid_commands: ['auth', 'list-tabs', 'read', 'structure', 'insert', 'append', 'replace', 'format', 'page-break', 'create', 'create-from-markdown', 'insert-from-markdown', 'delete', 'insert-image', 'insert-table']
     })
     usage
     exit DocsManager::EXIT_INVALID_ARGS

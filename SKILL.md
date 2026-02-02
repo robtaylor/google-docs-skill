@@ -1,10 +1,10 @@
 ---
 name: google-docs
-description: Manage Google Docs and Google Drive with full document operations and file management. Includes Markdown support for creating formatted documents with headings, bold, italic, lists, tables, and checkboxes. Also supports Drive operations (upload, download, share, search).
+description: Manage Google Docs and Google Drive with full document operations and file management. Includes Markdown support for creating formatted documents with headings, bold, italic, lists, tables, and checkboxes. Also supports Drive operations (upload, download, share, search). Supports document tabs for multi-tab documents.
 category: productivity
-version: 1.2.0
-key_capabilities: create-from-markdown, insert-from-markdown, tables, formatted text, Drive upload/download/share/search
-when_to_use: Document content operations, formatted document creation from Markdown, tables, Drive file management, sharing files
+version: 1.3.0
+key_capabilities: create-from-markdown, insert-from-markdown, tables, formatted text, Drive upload/download/share/search, document-tabs
+when_to_use: Document content operations, formatted document creation from Markdown, tables, Drive file management, sharing files, reading specific tabs in multi-tab documents
 ---
 
 # Google Docs & Drive Management Skill
@@ -15,6 +15,7 @@ Manage Google Docs documents and Google Drive files with comprehensive operation
 
 **Google Docs:**
 - Read document content and structure
+- **Document tabs support** - list tabs, read/structure from specific tabs
 - Insert and append text
 - Find and replace text
 - Basic text formatting (bold, italic, underline)
@@ -82,6 +83,50 @@ scripts/docs_manager.rb structure <document_id>
 - Full text content with paragraphs
 - Document metadata (title, revision ID)
 - Heading structure with levels and positions
+
+### 1b. Document Tabs
+
+Google Docs can have multiple tabs (like sheets in a spreadsheet). By default, `read` and `structure` return content from the first tab only.
+
+**List all tabs in a document**:
+```bash
+scripts/docs_manager.rb list-tabs <document_id>
+```
+
+**Output**:
+```json
+{
+  "status": "success",
+  "operation": "list_tabs",
+  "document_id": "abc123",
+  "title": "My Document",
+  "tab_count": 3,
+  "tabs": [
+    {"index": 1, "tab_id": "t.abc123", "title": "Introduction"},
+    {"index": 2, "tab_id": "t.def456", "title": "Details"},
+    {"index": 3, "tab_id": "t.ghi789", "title": "Appendix"}
+  ]
+}
+```
+
+**Read content from a specific tab**:
+```bash
+scripts/docs_manager.rb read <document_id> --tab-id <tab_id>
+```
+
+**Get structure from a specific tab**:
+```bash
+scripts/docs_manager.rb structure <document_id> --tab-id <tab_id>
+```
+
+**Example workflow**:
+```bash
+# 1. List tabs to find the one you need
+scripts/docs_manager.rb list-tabs 1iK06poEOjA...
+
+# 2. Read specific tab by ID
+scripts/docs_manager.rb read 1iK06poEOjA... --tab-id t.ntw1xvwqtssy
+```
 
 ### 2. Create Documents
 
@@ -577,8 +622,9 @@ For creating and managing Excalidraw diagrams, see the `excalidraw-diagrams` ski
 - Shared OAuth with other Google skills
 
 **Operations**:
-- `read`: View document content
-- `structure`: Get document headings and structure
+- `list-tabs`: List all tabs in a document
+- `read`: View document content (supports `--tab-id` for specific tab)
+- `structure`: Get document headings and structure (supports `--tab-id` for specific tab)
 - `insert`: Insert plain text at specific index
 - `insert-from-markdown`: Insert formatted markdown content
 - `append`: Append text to end
@@ -640,6 +686,16 @@ For creating and managing Excalidraw diagrams, see the `excalidraw-diagrams` ski
 ```
 **Action**: Verify document ID, check permissions
 
+**Tab Not Found**:
+```json
+{
+  "status": "error",
+  "error_code": "TAB_NOT_FOUND",
+  "message": "Tab with ID 't.xyz' not found in document"
+}
+```
+**Action**: Use `list-tabs` to see available tab IDs, verify the tab_id is correct
+
 **Invalid Index**:
 ```json
 {
@@ -695,9 +751,19 @@ For creating and managing Excalidraw diagrams, see the `excalidraw-diagrams` ski
 
 ## Quick Reference
 
-**Read document**:
+**List document tabs**:
+```bash
+scripts/docs_manager.rb list-tabs <document_id>
+```
+
+**Read document** (first tab by default):
 ```bash
 scripts/docs_manager.rb read <document_id>
+```
+
+**Read specific tab**:
+```bash
+scripts/docs_manager.rb read <document_id> --tab-id <tab_id>
 ```
 
 **Create document from Markdown (RECOMMENDED)**:
@@ -785,6 +851,7 @@ echo '{"document_id":"abc123","image_url":"https://example.com/image.png"}' | sc
 
 ## Version History
 
+- **1.3.0** (2026-02-02) - Added document tabs support: `list-tabs` command to list all tabs in a document, `--tab-id` option for `read` and `structure` commands to access specific tabs. Documents with multiple tabs can now be fully navigated.
 - **1.2.0** (2025-12-25) - Added markdown support documentation: `create-from-markdown`, `insert-from-markdown`, `insert-table` commands. Supports headings, bold, italic, code, lists, checkboxes, tables, and horizontal rules.
 - **1.1.0** (2025-12-20) - Added Google Drive operations via drive_manager.rb: upload, download, search, list, share, move, copy, delete, folder management. Integrated with excalidraw-diagrams skill for diagram workflows.
 - **1.0.0** (2025-11-10) - Initial Google Docs skill with full document operations: read, create, insert, append, replace, format, page breaks, structure analysis. Shared OAuth token with email, calendar, contacts, drive, and sheets skills.

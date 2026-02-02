@@ -50,7 +50,7 @@ class DriveManager
     credentials = authorizer.get_credentials(user_id)
 
     if credentials.nil?
-      url = authorizer.get_authorization_url(base_url: 'urn:ietf:wg:oauth:2.0:oob')
+      url = authorizer.get_authorization_url(base_url: 'http://localhost')
       output_json({
         status: 'error',
         error_code: 'AUTH_REQUIRED',
