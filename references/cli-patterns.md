@@ -118,7 +118,7 @@ echo '{
       }
     }
   ]
-}' | sheets_manager.rb batch_update
+}' | sheets_manager.rb batch-write
 ```
 
 ### When JSON Works Well
@@ -130,17 +130,17 @@ echo '{
 
 ### Simple Operation Shortcuts
 
-For common simple operations, flags can provide shortcuts (future enhancement):
+For common simple operations, flag shortcuts could be added as a future enhancement:
 
 ```bash
-# Current: JSON for everything
+# Current: JSON for all operations
 echo '{"spreadsheet_id":"ID","range":"Sheet1!A1"}' | sheets_manager.rb read
 
-# Future: Flag shortcuts for simple reads
+# Possible future: Flag shortcuts for simple reads
 sheets_manager.rb read --id "ID" --range "Sheet1!A1"
 
-# But complex operations still use JSON
-echo '{...}' | sheets_manager.rb batch_update  # No flag equivalent
+# Complex operations use JSON (no flag equivalent)
+echo '{...}' | sheets_manager.rb batch-write
 ```
 
 ---
@@ -397,14 +397,14 @@ echo '{
 ### google-sheets: Add Simple Flag Shortcuts
 
 ```bash
-# Current JSON for all operations
+# Current: JSON for all operations
 echo '{"spreadsheet_id":"ID","range":"A1"}' | sheets_manager.rb read
 
-# Future flags for simple reads
+# Possible future: Flag shortcuts for simple reads
 sheets_manager.rb read --id "ID" --range "Sheet1!A1"
 
-# JSON still available for complex operations
-echo '{...complex batch operation...}' | sheets_manager.rb batch_update
+# JSON still required for complex operations
+echo '{...complex batch operation...}' | sheets_manager.rb batch-write
 ```
 
 ### google-docs: Maintain Mixed Approach
