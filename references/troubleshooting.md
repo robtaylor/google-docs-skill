@@ -141,12 +141,12 @@ All three Google skills use standardized exit codes:
 1. Verify file ID is correct (long alphanumeric string, not file name)
 2. Check file exists with search:
    ```bash
-   ~/.claude/skills/google-drive/scripts/drive_manager.rb search \
+   scripts/drive_manager.rb search \
      --query "name='Your File Name'"
    ```
 3. Verify you have access to the file:
    ```bash
-   ~/.claude/skills/google-drive/scripts/drive_manager.rb list-permissions \
+   scripts/drive_manager.rb list-permissions \
      --file-id "FILE_ID"
    ```
 4. If file is shared, ensure it's shared with your authenticated account
@@ -171,13 +171,13 @@ All three Google skills use standardized exit codes:
 **Solution Steps**:
 1. Check current permissions:
    ```bash
-   ~/.claude/skills/google-drive/scripts/drive_manager.rb list-permissions \
+   scripts/drive_manager.rb list-permissions \
      --file-id "FILE_ID"
    ```
 2. If you're not the owner, request permission from file owner
 3. If you are the owner but using different account, share to authenticated account:
    ```bash
-   ~/.claude/skills/google-drive/scripts/drive_manager.rb share \
+   scripts/drive_manager.rb share \
      --file-id "FILE_ID" \
      --email "your-authenticated-email@gmail.com" \
      --role "writer"
@@ -204,7 +204,7 @@ All three Google skills use standardized exit codes:
 1. Get spreadsheet metadata to see available sheets:
    ```bash
    echo '{"spreadsheet_id":"SPREADSHEET_ID"}' | \
-     ~/.claude/skills/google-sheets/scripts/sheets_manager.rb metadata
+     scripts/sheets_manager.rb get-metadata
    ```
 2. Use exact sheet name (case-sensitive) from metadata
 3. Verify A1 notation syntax: `SheetName!A1:B10`
@@ -233,7 +233,7 @@ All three Google skills use standardized exit codes:
 **Solution Steps**:
 1. Read document to get current structure:
    ```bash
-   ~/.claude/skills/google-docs/scripts/docs_manager.rb structure "DOCUMENT_ID"
+   scripts/docs_manager.rb structure "DOCUMENT_ID"
    ```
 2. Use `append` operation instead of `insert` for adding to end
 3. Calculate correct indices based on content length
@@ -262,7 +262,7 @@ All three Google skills use standardized exit codes:
 1. Wait time specified in error message
 2. Implement exponential backoff for retry logic
 3. Use batch operations instead of individual calls:
-   - google-sheets: Use `batch_update` for multiple formatting operations
+   - google-sheets: Use `batch-write` for multiple data operations
    - google-drive: Process files in smaller batches
 
 **Prevention**:
@@ -486,11 +486,14 @@ drive_manager.rb get --file-id "FILE_ID"
 
 Ruby gem errors may provide additional context:
 ```bash
-# Check Ruby gem installation
-gem list | grep google-apis
+# Verify Bundler setup (from skill root directory)
+bundle check
 
-# Verify required gems installed
-gem install google-apis-drive_v3 google-apis-sheets_v4 google-apis-docs_v1 googleauth
+# If gems are missing, install them
+bundle install
+
+# Check installed gem versions
+bundle list | grep google-apis
 ```
 
 ### Verify API Enablement

@@ -1,6 +1,29 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+# Re-exec under a newer Ruby if the current one is too old for Bundler 2+
+if RUBY_VERSION < '3.1'
+  candidates = Dir.glob(File.join(Dir.home, '.rbenv/versions/*/bin/ruby')) +
+               Dir.glob(File.join(Dir.home, '.asdf/installs/ruby/*/bin/ruby')) +
+               Dir.glob(File.join(Dir.home, '.local/share/mise/installs/ruby/*/bin/ruby'))
+  new_ruby = candidates.sort_by { |p| p.scan(/\d+/).map(&:to_i) }.last
+  if new_ruby
+    exec(new_ruby, __FILE__, *ARGV)
+  else
+    warn "Ruby >= 3.1 required (current: #{RUBY_VERSION}). Install via rbenv/asdf/mise."
+    exit 1
+  end
+end
+
+ENV['BUNDLE_GEMFILE'] ||= File.expand_path('../Gemfile', __dir__)
+begin
+  require 'bundler/setup'
+rescue LoadError, Bundler::LockfileError => e
+  warn "Bundler setup failed: #{e.message}"
+  warn "Run: cd #{File.expand_path('..', __dir__)} && bundle install"
+  exit 1
+end
+
 require 'google/apis/docs_v1'
 require 'google/apis/drive_v3'
 require 'google/apis/sheets_v4'

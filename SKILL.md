@@ -1,17 +1,17 @@
 ---
 name: google-docs
-description: Manage Google Docs and Google Drive with full document operations and file management. Includes Markdown support for creating formatted documents with headings, bold, italic, lists, tables, and checkboxes. Also supports Drive operations (upload, download, share, search).
+description: Manage Google Docs, Google Sheets, and Google Drive with full document operations, spreadsheet editing, and file management. Includes Markdown support for creating formatted documents with headings, bold, italic, lists, tables, and checkboxes. Also supports Drive operations (upload, download, share, search) and comprehensive Sheets operations (read, write, format, charts, formulas).
 category: productivity
-version: 1.2.0
-key_capabilities: create-from-markdown, insert-from-markdown, tables, formatted text, Drive upload/download/share/search
-when_to_use: Document content operations, formatted document creation from Markdown, tables, Drive file management, sharing files
+version: 1.3.0
+key_capabilities: create-from-markdown, insert-from-markdown, tables, formatted text, Drive upload/download/share/search, sheets
+when_to_use: Document content operations, formatted document creation from Markdown, tables, Drive file management, sharing files, spreadsheet operations, sheets data read/write/format
 ---
 
-# Google Docs & Drive Management Skill
+# Google Docs, Sheets & Drive Management Skill
 
 ## Purpose
 
-Manage Google Docs documents and Google Drive files with comprehensive operations:
+Manage Google Docs documents, Google Sheets spreadsheets, and Google Drive files with comprehensive operations:
 
 **Google Docs:**
 - Read document content and structure
@@ -33,12 +33,31 @@ Manage Google Docs documents and Google Drive files with comprehensive operation
 - Move, copy, and delete files
 - Get file metadata
 
-**Integration**: The drive_manager.rb script shares OAuth credentials with docs_manager.rb
+**Google Sheets:**
+- Create, read, write, and append spreadsheet data
+- Batch read/write across multiple ranges
+- Format cells (bold, colors, fonts, alignment, borders, number formats)
+- Merge/unmerge cells, freeze rows/columns
+- Sort ranges, find and replace, add filters
+- Add charts, protect ranges, conditional formatting
+- Manage sheets/tabs (add, delete, rename, copy)
+- Set column widths and row heights, auto-resize
+
+**Integration**: All scripts share OAuth credentials
 
 **📚 Additional Resources**:
 - See `references/integration-patterns.md` for complete workflow examples
 - See `references/troubleshooting.md` for error handling and debugging
 - See `references/cli-patterns.md` for CLI interface design rationale
+
+## Prerequisites
+
+**Ruby**: Requires Ruby >= 3.1. The `.ruby-version` file pins 3.4.3 for version managers (rbenv, asdf, mise, etc.).
+
+**Gems**: Managed via Bundler. Run once from the skill root before first use:
+```bash
+cd ~/.claude/skills/google-docs && bundle install
+```
 
 ## When to Use This Skill
 
@@ -49,7 +68,9 @@ Use this skill when:
 - User requests text formatting or modifications
 - User asks about document structure or headings
 - User wants to find and replace text
-- Keywords: "Google Doc", "document", "edit doc", "format text", "insert text"
+- User wants to create, read, write, or format a Google Sheet/spreadsheet
+- User wants to add charts, filters, or conditional formatting to a spreadsheet
+- Keywords: "Google Doc", "document", "edit doc", "format text", "insert text", "spreadsheet", "Google Sheet", "sheet", "cells", "rows", "columns"
 
 **📋 Discovering Your Documents**:
 To list or search for documents, use drive_manager.rb:
@@ -511,6 +532,360 @@ All commands return JSON with consistent structure:
 }
 ```
 
+## Google Sheets Operations
+
+The `sheets_manager.rb` script provides comprehensive Google Sheets spreadsheet management. All commands accept JSON via stdin.
+
+### Create Spreadsheet
+
+```bash
+# Create with default sheet
+echo '{"title": "Budget 2024"}' | scripts/sheets_manager.rb create
+
+# Create with named sheets and initial data
+echo '{
+  "title": "Budget 2024",
+  "sheets": ["Income", "Expenses", "Summary"],
+  "data": [["Category", "Amount"], ["Salary", 5000]]
+}' | scripts/sheets_manager.rb create
+```
+
+### Read Data
+
+```bash
+# Read a range
+echo '{
+  "spreadsheet_id": "abc123",
+  "range": "Sheet1!A1:C10"
+}' | scripts/sheets_manager.rb read
+
+# Read multiple ranges at once
+echo '{
+  "spreadsheet_id": "abc123",
+  "ranges": ["Sheet1!A1:C10", "Sheet2!A1:B5"]
+}' | scripts/sheets_manager.rb batch-read
+```
+
+### Write Data
+
+```bash
+# Write values to a range
+echo '{
+  "spreadsheet_id": "abc123",
+  "range": "Sheet1!A1:B2",
+  "values": [["Name", "Age"], ["Alice", 30]]
+}' | scripts/sheets_manager.rb write
+
+# Append rows after existing data
+echo '{
+  "spreadsheet_id": "abc123",
+  "range": "Sheet1!A:B",
+  "values": [["Bob", 25], ["Carol", 28]]
+}' | scripts/sheets_manager.rb append
+
+# Write to multiple ranges at once
+echo '{
+  "spreadsheet_id": "abc123",
+  "data": [
+    {"range": "Sheet1!A1:B2", "values": [["a", "b"], ["c", "d"]]},
+    {"range": "Sheet2!A1:B2", "values": [["x", "y"], ["z", "w"]]}
+  ]
+}' | scripts/sheets_manager.rb batch-write
+```
+
+### Clear Data
+
+```bash
+echo '{
+  "spreadsheet_id": "abc123",
+  "range": "Sheet1!A1:C10"
+}' | scripts/sheets_manager.rb clear
+```
+
+### Get Spreadsheet Metadata
+
+```bash
+echo '{"spreadsheet_id": "abc123"}' | scripts/sheets_manager.rb get-metadata
+```
+
+Returns: title, locale, time zone, sheet names/IDs, row/column counts, frozen rows/columns.
+
+### Sheet/Tab Management
+
+```bash
+# Add a new sheet
+echo '{
+  "spreadsheet_id": "abc123",
+  "title": "New Sheet"
+}' | scripts/sheets_manager.rb add-sheet
+
+# Delete a sheet (use sheet_id from get-metadata)
+echo '{
+  "spreadsheet_id": "abc123",
+  "sheet_id": 123456789
+}' | scripts/sheets_manager.rb delete-sheet
+
+# Rename a sheet
+echo '{
+  "spreadsheet_id": "abc123",
+  "sheet_id": 0,
+  "title": "Renamed Sheet"
+}' | scripts/sheets_manager.rb rename-sheet
+
+# Copy sheet within same spreadsheet
+echo '{
+  "spreadsheet_id": "abc123",
+  "sheet_id": 0
+}' | scripts/sheets_manager.rb copy-sheet
+
+# Copy sheet to another spreadsheet
+echo '{
+  "spreadsheet_id": "abc123",
+  "sheet_id": 0,
+  "destination_spreadsheet_id": "xyz789"
+}' | scripts/sheets_manager.rb copy-sheet
+```
+
+### Format Cells
+
+```bash
+# Bold headers with background color
+echo '{
+  "spreadsheet_id": "abc123",
+  "sheet_id": 0,
+  "range": "A1:D1",
+  "bold": true,
+  "background_color": {"red": 0.2, "green": 0.5, "blue": 0.8},
+  "foreground_color": {"red": 1, "green": 1, "blue": 1},
+  "horizontal_alignment": "CENTER"
+}' | scripts/sheets_manager.rb format
+
+# Number formatting
+echo '{
+  "spreadsheet_id": "abc123",
+  "sheet_id": 0,
+  "range": "B2:B100",
+  "number_format": {"type": "NUMBER", "pattern": "#,##0.00"}
+}' | scripts/sheets_manager.rb format
+
+# Full formatting example
+echo '{
+  "spreadsheet_id": "abc123",
+  "sheet_id": 0,
+  "range": "A1:D1",
+  "bold": true,
+  "italic": false,
+  "font_size": 12,
+  "font_family": "Arial",
+  "foreground_color": {"red": 0, "green": 0, "blue": 0},
+  "background_color": {"red": 0.9, "green": 0.9, "blue": 0.9},
+  "horizontal_alignment": "CENTER",
+  "vertical_alignment": "MIDDLE",
+  "wrap_strategy": "WRAP",
+  "borders": {
+    "bottom": {"style": "SOLID", "color": {"red": 0, "green": 0, "blue": 0}}
+  }
+}' | scripts/sheets_manager.rb format
+```
+
+**Format options reference:**
+- `bold`, `italic`, `underline` - boolean
+- `font_size` - integer (points)
+- `font_family` - string (e.g. "Arial", "Courier New")
+- `foreground_color` / `background_color` - `{red, green, blue}` floats 0-1
+- `horizontal_alignment` - `LEFT`, `CENTER`, `RIGHT`
+- `vertical_alignment` - `TOP`, `MIDDLE`, `BOTTOM`
+- `number_format` - `{type, pattern}` where type is `NUMBER`, `CURRENCY`, `PERCENT`, `DATE`, `TIME`, `SCIENTIFIC`, `TEXT`
+- `wrap_strategy` - `OVERFLOW_CELL`, `CLIP`, `WRAP`
+- `text_rotation` - angle in degrees
+- `borders` - `{top, bottom, left, right}` each with `{style, color}` where style is `SOLID`, `DASHED`, `DOTTED`, `SOLID_MEDIUM`, `SOLID_THICK`, `DOUBLE`
+
+### Merge and Unmerge Cells
+
+```bash
+# Merge cells
+echo '{
+  "spreadsheet_id": "abc123",
+  "sheet_id": 0,
+  "range": "A1:C1",
+  "merge_type": "MERGE_ALL"
+}' | scripts/sheets_manager.rb merge-cells
+
+# Unmerge cells
+echo '{
+  "spreadsheet_id": "abc123",
+  "sheet_id": 0,
+  "range": "A1:C1"
+}' | scripts/sheets_manager.rb unmerge-cells
+```
+
+Merge types: `MERGE_ALL`, `MERGE_ROWS`, `MERGE_COLUMNS`
+
+### Freeze Rows/Columns
+
+```bash
+# Freeze first row (header)
+echo '{
+  "spreadsheet_id": "abc123",
+  "sheet_id": 0,
+  "rows": 1
+}' | scripts/sheets_manager.rb freeze
+
+# Freeze first row and first column
+echo '{
+  "spreadsheet_id": "abc123",
+  "sheet_id": 0,
+  "rows": 1,
+  "cols": 1
+}' | scripts/sheets_manager.rb freeze
+```
+
+### Column and Row Sizing
+
+```bash
+# Auto-resize columns to fit content (0-based indices)
+echo '{
+  "spreadsheet_id": "abc123",
+  "sheet_id": 0,
+  "start_col": 0,
+  "end_col": 5
+}' | scripts/sheets_manager.rb auto-resize
+
+# Set column width in pixels
+echo '{
+  "spreadsheet_id": "abc123",
+  "sheet_id": 0,
+  "start_col": 0,
+  "end_col": 1,
+  "width": 200
+}' | scripts/sheets_manager.rb set-column-width
+
+# Set row height in pixels
+echo '{
+  "spreadsheet_id": "abc123",
+  "sheet_id": 0,
+  "start_row": 0,
+  "end_row": 1,
+  "height": 40
+}' | scripts/sheets_manager.rb set-row-height
+```
+
+### Sort Data
+
+```bash
+# Sort by column A ascending (sort_column is 0-based)
+echo '{
+  "spreadsheet_id": "abc123",
+  "sheet_id": 0,
+  "range": "A2:D100",
+  "sort_column": 0,
+  "ascending": true
+}' | scripts/sheets_manager.rb sort
+```
+
+### Find and Replace
+
+```bash
+# Replace across entire spreadsheet
+echo '{
+  "spreadsheet_id": "abc123",
+  "find": "Q3",
+  "replace": "Q4"
+}' | scripts/sheets_manager.rb find-replace
+
+# Replace in specific sheet with options
+echo '{
+  "spreadsheet_id": "abc123",
+  "find": "old value",
+  "replace": "new value",
+  "sheet_id": 0,
+  "match_case": true,
+  "match_entire_cell": false
+}' | scripts/sheets_manager.rb find-replace
+```
+
+### Add Filter
+
+```bash
+echo '{
+  "spreadsheet_id": "abc123",
+  "sheet_id": 0,
+  "range": "A1:D100"
+}' | scripts/sheets_manager.rb add-filter
+```
+
+### Add Chart
+
+```bash
+echo '{
+  "spreadsheet_id": "abc123",
+  "sheet_id": 0,
+  "range": "A1:C10",
+  "chart_type": "BAR",
+  "title": "Sales by Region"
+}' | scripts/sheets_manager.rb add-chart
+```
+
+Chart types: `BAR`, `LINE`, `PIE`, `COLUMN`, `AREA`, `SCATTER`
+
+### Protect Range
+
+```bash
+# Protect with specific editors
+echo '{
+  "spreadsheet_id": "abc123",
+  "sheet_id": 0,
+  "range": "A1:D1",
+  "description": "Header row - do not edit",
+  "editors": ["admin@company.com"]
+}' | scripts/sheets_manager.rb protect-range
+```
+
+### Conditional Formatting
+
+```bash
+# Boolean rule: highlight cells greater than 100
+echo '{
+  "spreadsheet_id": "abc123",
+  "sheet_id": 0,
+  "range": "B2:B100",
+  "rule_type": "BOOLEAN",
+  "condition_type": "NUMBER_GREATER",
+  "condition_values": ["100"],
+  "format_background_color": {"red": 0.8, "green": 1, "blue": 0.8}
+}' | scripts/sheets_manager.rb add-conditional-format
+
+# Gradient rule: color scale from red to green
+echo '{
+  "spreadsheet_id": "abc123",
+  "sheet_id": 0,
+  "range": "C2:C100",
+  "rule_type": "GRADIENT",
+  "min_color": {"red": 0.8, "green": 0.2, "blue": 0.2},
+  "max_color": {"red": 0.2, "green": 0.8, "blue": 0.2}
+}' | scripts/sheets_manager.rb add-conditional-format
+```
+
+### Range Notation (A1 Format)
+
+Ranges use standard spreadsheet A1 notation:
+- `A1` - single cell
+- `A1:C5` - rectangular range
+- `A:C` - entire columns A through C
+- `1:5` - entire rows 1 through 5
+- `Sheet1!A1:C5` - range on specific sheet (the sheet name prefix is stripped; use `sheet_id` for sheet targeting in format/merge operations)
+
+### Discovering Spreadsheets
+
+Use drive_manager.rb to find spreadsheets:
+```bash
+scripts/drive_manager.rb search \
+  --query "mimeType='application/vnd.google-apps.spreadsheet'"
+
+scripts/drive_manager.rb search \
+  --query "name contains 'Budget' and mimeType='application/vnd.google-apps.spreadsheet'"
+```
+
 ---
 
 ## Integration Workflows
@@ -595,6 +970,45 @@ For creating and managing Excalidraw diagrams, see the `excalidraw-diagrams` ski
 - JSON with `status: 'success'` or `status: 'error'`
 - Document operations return document_id and revision_id
 - See script help: `scripts/docs_manager.rb --help`
+
+**`scripts/sheets_manager.rb`**
+- Comprehensive Google Sheets API wrapper
+- All spreadsheet operations: create, read, write, append, clear, format, sort, charts, filters
+- Sheet/tab management: add, delete, rename, copy
+- Cell formatting: bold, colors, fonts, alignment, borders, number formats, merge
+- Batch read/write across multiple ranges
+- Conditional formatting and protected ranges
+- Shared OAuth with other Google skills
+
+**Operations**:
+- `create`: Create new spreadsheet with optional sheets and data
+- `read`: Read cell range values
+- `write`: Write values to range
+- `append`: Append rows after existing data
+- `clear`: Clear cell range
+- `batch-read`: Read multiple ranges at once
+- `batch-write`: Write to multiple ranges at once
+- `get-metadata`: Get spreadsheet info (title, sheets, dimensions)
+- `add-sheet`: Add new sheet/tab
+- `delete-sheet`: Delete sheet/tab
+- `rename-sheet`: Rename sheet/tab
+- `copy-sheet`: Copy sheet within or to another spreadsheet
+- `format`: Format cells (bold, colors, alignment, borders, number format, etc.)
+- `merge-cells` / `unmerge-cells`: Merge or unmerge cell ranges
+- `freeze`: Freeze rows and/or columns
+- `auto-resize`: Auto-resize columns to fit content
+- `sort`: Sort range by column
+- `find-replace`: Find and replace across spreadsheet
+- `set-column-width` / `set-row-height`: Set dimension sizes
+- `add-filter`: Add basic filter to range
+- `add-chart`: Add chart from data range
+- `protect-range`: Protect cells from editing
+- `add-conditional-format`: Add conditional formatting rules
+
+**Output Format**:
+- JSON with `status: 'success'` or `status: 'error'`
+- Spreadsheet operations return spreadsheet_id and operation details
+- See script help: `scripts/sheets_manager.rb --help`
 
 ### References
 
@@ -750,6 +1164,36 @@ echo '{"document_id":"abc123","rows":3,"cols":2,"data":[["A","B"],["1","2"],["3"
 echo '{"document_id":"abc123","image_url":"https://example.com/image.png"}' | scripts/docs_manager.rb insert-image
 ```
 
+**Google Sheets - Create spreadsheet**:
+```bash
+echo '{"title":"My Sheet"}' | scripts/sheets_manager.rb create
+```
+
+**Google Sheets - Read data**:
+```bash
+echo '{"spreadsheet_id":"abc123","range":"Sheet1!A1:C10"}' | scripts/sheets_manager.rb read
+```
+
+**Google Sheets - Write data**:
+```bash
+echo '{"spreadsheet_id":"abc123","range":"Sheet1!A1:B2","values":[["Name","Age"],["Alice",30]]}' | scripts/sheets_manager.rb write
+```
+
+**Google Sheets - Append rows**:
+```bash
+echo '{"spreadsheet_id":"abc123","range":"Sheet1!A:B","values":[["Bob",25]]}' | scripts/sheets_manager.rb append
+```
+
+**Google Sheets - Format cells**:
+```bash
+echo '{"spreadsheet_id":"abc123","sheet_id":0,"range":"A1:D1","bold":true,"background_color":{"red":0.9,"green":0.9,"blue":0.9}}' | scripts/sheets_manager.rb format
+```
+
+**Google Sheets - Get metadata**:
+```bash
+echo '{"spreadsheet_id":"abc123"}' | scripts/sheets_manager.rb get-metadata
+```
+
 ## Example Workflow: Creating and Editing a Report
 
 1. **Create document with formatted content**:
@@ -785,10 +1229,11 @@ echo '{"document_id":"abc123","image_url":"https://example.com/image.png"}' | sc
 
 ## Version History
 
+- **1.3.0** (2026-02-06) - Added full Google Sheets support via sheets_manager.rb: create, read, write, append, clear, batch operations, format cells (bold, colors, fonts, alignment, borders, number formats), merge/unmerge, freeze, sort, find-replace, charts, filters, conditional formatting, protected ranges, sheet/tab management (add, delete, rename, copy), column/row sizing.
 - **1.2.0** (2025-12-25) - Added markdown support documentation: `create-from-markdown`, `insert-from-markdown`, `insert-table` commands. Supports headings, bold, italic, code, lists, checkboxes, tables, and horizontal rules.
 - **1.1.0** (2025-12-20) - Added Google Drive operations via drive_manager.rb: upload, download, search, list, share, move, copy, delete, folder management. Integrated with excalidraw-diagrams skill for diagram workflows.
 - **1.0.0** (2025-11-10) - Initial Google Docs skill with full document operations: read, create, insert, append, replace, format, page breaks, structure analysis. Shared OAuth token with email, calendar, contacts, drive, and sheets skills.
 
 ---
 
-**Dependencies**: Ruby with `google-apis-docs_v1`, `google-apis-drive_v3`, `googleauth` gems (shared with other Google skills)
+**Dependencies**: Ruby >= 3.1, Bundler (`Gemfile`/`Gemfile.lock`). Run `bundle install` once before first use.
