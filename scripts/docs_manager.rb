@@ -10,6 +10,8 @@ require 'googleauth'
 require 'googleauth/stores/file_token_store'
 require 'fileutils'
 require 'json'
+require 'socket'
+require 'uri'
 
 # Google Docs Manager - Google CLI Integration for Document Operations
 # Version: 1.0.0
@@ -43,6 +45,9 @@ class DocsManager
     @drive_service.authorization = authorize
   end
 
+  # Default port for OAuth callback
+  DEFAULT_OAUTH_PORT = 8085
+
   # Authorize using shared OAuth token with all scopes
   def authorize
     client_id = Google::Auth::ClientId.from_file(CREDENTIALS_PATH)
@@ -59,17 +64,22 @@ class DocsManager
     credentials = authorizer.get_credentials(user_id)
 
     if credentials.nil?
-      url = authorizer.get_authorization_url(base_url: 'urn:ietf:wg:oauth:2.0:oob')
+      # Use localhost redirect flow instead of deprecated OOB
+      redirect_uri = "http://localhost:#{DEFAULT_OAUTH_PORT}"
+      url = authorizer.get_authorization_url(base_url: redirect_uri)
       output_json({
         status: 'error',
         error_code: 'AUTH_REQUIRED',
-        message: 'Authorization required. Please visit the URL and enter the code.',
+        message: 'Authorization required. Please visit the URL to authorize.',
         auth_url: url,
+        redirect_uri: redirect_uri,
+        port: DEFAULT_OAUTH_PORT,
         instructions: [
-          '1. Visit the authorization URL',
-          '2. Grant access to Google Docs, Drive, Sheets, Calendar, Contacts, and Gmail',
-          '3. Copy the authorization code',
-          "4. Run: ruby #{__FILE__} auth <code>"
+          '1. First, start the callback listener in another terminal:',
+          "   ruby #{__FILE__} auth-listen",
+          '2. Visit the authorization URL in your browser',
+          '3. Grant access to Google Docs, Drive, Sheets, Calendar, Contacts, and Gmail',
+          '4. After authorizing, you will be redirected to localhost and auth will complete automatically'
         ]
       })
       exit EXIT_AUTH_ERROR
@@ -81,7 +91,7 @@ class DocsManager
   end
 
   # Complete OAuth authorization with code
-  def complete_auth(code)
+  def complete_auth(code, redirect_uri = nil)
     client_id = Google::Auth::ClientId.from_file(CREDENTIALS_PATH)
     token_store = Google::Auth::Stores::FileTokenStore.new(file: TOKEN_PATH)
 
@@ -92,10 +102,12 @@ class DocsManager
     )
 
     user_id = 'default'
+    # Use provided redirect_uri or default to localhost
+    base_url = redirect_uri || 'http://localhost'
     credentials = authorizer.get_and_store_credentials_from_code(
       user_id: user_id,
       code: code,
-      base_url: 'urn:ietf:wg:oauth:2.0:oob'
+      base_url: base_url
     )
 
     output_json({
@@ -113,21 +125,175 @@ class DocsManager
     exit EXIT_AUTH_ERROR
   end
 
-  # Read document content
-  def read_document(document_id:)
-    document = @docs_service.get_document(document_id)
+  # Start a local server to listen for OAuth callback
+  def self.auth_listen(port = DEFAULT_OAUTH_PORT)
+    server = TCPServer.new('127.0.0.1', port)
+    redirect_uri = "http://localhost:#{port}"
 
-    # Extract text content
-    content = extract_text_content(document.body.content)
-
-    output_json({
-      status: 'success',
-      operation: 'read',
-      document_id: document.document_id,
-      title: document.title,
-      content: content,
-      revision_id: document.revision_id
+    puts JSON.pretty_generate({
+      status: 'waiting',
+      message: "Listening on port #{port} for OAuth callback...",
+      redirect_uri: redirect_uri,
+      instructions: 'Complete the authorization in your browser. This will automatically capture the code.'
     })
+    $stdout.flush
+
+    # Wait for the OAuth callback
+    client = server.accept
+    request = client.gets
+
+    # Parse the request to extract the authorization code
+    # Handle both root path (/?code=...) and /oauth2callback path
+    if request && request.include?('code=')
+      # Extract code from: GET /?code=XXXXX&scope=... HTTP/1.1
+      # or: GET /oauth2callback?code=XXXXX&scope=... HTTP/1.1
+      uri_part = request.split(' ')[1]
+      query_string = uri_part.include?('?') ? uri_part.split('?')[1] : ''
+      params = URI.decode_www_form(query_string)
+      code = params.to_h['code']
+
+      if code
+        # Send success response to browser
+        response = <<~HTML
+          HTTP/1.1 200 OK
+          Content-Type: text/html
+
+          <!DOCTYPE html>
+          <html>
+          <head><title>Authorization Successful</title></head>
+          <body style="font-family: system-ui; text-align: center; padding: 50px;">
+            <h1>✓ Authorization Successful!</h1>
+            <p>You can close this window and return to your terminal.</p>
+          </body>
+          </html>
+        HTML
+        client.print(response)
+        client.close
+        server.close
+
+        # Now complete the authorization - use the redirect_uri WITH /oauth2callback
+        # since that's what Google sends in the authorization request
+        callback_uri = "#{redirect_uri}/oauth2callback"
+        temp_manager = DocsManager.allocate
+        temp_manager.complete_auth(code, callback_uri)
+      else
+        client.print("HTTP/1.1 400 Bad Request\r\n\r\nNo authorization code found")
+        client.close
+        server.close
+        puts JSON.pretty_generate({
+          status: 'error',
+          error_code: 'NO_CODE',
+          message: 'No authorization code found in callback'
+        })
+        exit EXIT_AUTH_ERROR
+      end
+    elsif request && request.include?('error=')
+      # Handle error response
+      uri_part = request.split(' ')[1]
+      query_string = uri_part.include?('?') ? uri_part.split('?')[1] : ''
+      params = URI.decode_www_form(query_string)
+      error = params.to_h['error']
+      error_description = params.to_h['error_description']
+
+      client.print("HTTP/1.1 400 Bad Request\r\n\r\nAuthorization failed: #{error}")
+      client.close
+      server.close
+      puts JSON.pretty_generate({
+        status: 'error',
+        error_code: 'AUTH_DENIED',
+        message: "Authorization failed: #{error}",
+        description: error_description
+      })
+      exit EXIT_AUTH_ERROR
+    else
+      client.print("HTTP/1.1 400 Bad Request\r\n\r\nInvalid request")
+      client.close
+      server.close
+      puts JSON.pretty_generate({
+        status: 'error',
+        error_code: 'INVALID_CALLBACK',
+        message: 'Invalid OAuth callback received'
+      })
+      exit EXIT_AUTH_ERROR
+    end
+  rescue Errno::EADDRINUSE
+    puts JSON.pretty_generate({
+      status: 'error',
+      error_code: 'PORT_IN_USE',
+      message: "Port #{port} is already in use. Try a different port or stop the process using it."
+    })
+    exit EXIT_AUTH_ERROR
+  rescue StandardError => e
+    puts JSON.pretty_generate({
+      status: 'error',
+      error_code: 'LISTEN_FAILED',
+      message: "Failed to listen for callback: #{e.message}"
+    })
+    exit EXIT_AUTH_ERROR
+  end
+
+  # Read document content
+  def read_document(document_id:, tab_id: nil)
+    document = @docs_service.get_document(document_id, include_tabs_content: true)
+
+    tabs = flatten_tabs(document.tabs || [])
+
+    if tab_id
+      tab = tabs.find { |t| t.tab_properties&.tab_id == tab_id }
+      unless tab
+        output_json({
+          status: 'error',
+          error_code: 'TAB_NOT_FOUND',
+          operation: 'read',
+          message: "Tab '#{tab_id}' not found. Available tabs: #{tabs.map { |t| { id: t.tab_properties&.tab_id, title: t.tab_properties&.title } }}"
+        })
+        exit EXIT_OPERATION_FAILED
+      end
+      content = extract_text_content(tab.document_tab.body.content)
+      output_json({
+        status: 'success',
+        operation: 'read',
+        document_id: document.document_id,
+        title: document.title,
+        tab_id: tab.tab_properties&.tab_id,
+        tab_title: tab.tab_properties&.title,
+        content: content,
+        revision_id: document.revision_id
+      })
+    elsif tabs.length > 1
+      tab_contents = tabs.map do |tab|
+        {
+          tab_id: tab.tab_properties&.tab_id,
+          tab_title: tab.tab_properties&.title,
+          content: extract_text_content(tab.document_tab.body.content)
+        }
+      end
+      output_json({
+        status: 'success',
+        operation: 'read',
+        document_id: document.document_id,
+        title: document.title,
+        tab_count: tabs.length,
+        tabs: tab_contents,
+        revision_id: document.revision_id
+      })
+    else
+      # Single tab - backward compatible
+      body_content = if tabs.any?
+                       tabs.first.document_tab.body.content
+                     else
+                       document.body&.content || []
+                     end
+      content = extract_text_content(body_content)
+      output_json({
+        status: 'success',
+        operation: 'read',
+        document_id: document.document_id,
+        title: document.title,
+        content: content,
+        revision_id: document.revision_id
+      })
+    end
   rescue Google::Apis::Error => e
     output_json({
       status: 'error',
@@ -148,36 +314,86 @@ class DocsManager
   end
 
   # Get document structure (headings, sections)
-  def get_structure(document_id:)
-    document = @docs_service.get_document(document_id)
+  def get_structure(document_id:, tab_id: nil)
+    document = @docs_service.get_document(document_id, include_tabs_content: true)
 
-    structure = []
-    document.body.content.each do |element|
-      next unless element.paragraph
+    tabs = flatten_tabs(document.tabs || [])
 
-      paragraph = element.paragraph
-      next unless paragraph.paragraph_style && paragraph.paragraph_style.named_style_type
+    extract_structure = lambda do |content_elements|
+      structure = []
+      content_elements.each do |element|
+        next unless element.paragraph
 
-      style = paragraph.paragraph_style.named_style_type
-      if style.start_with?('HEADING_')
-        level = style.split('_').last.to_i
-        text = extract_paragraph_text(paragraph)
-        structure << {
-          level: level,
-          text: text,
-          start_index: element.start_index,
-          end_index: element.end_index
-        }
+        paragraph = element.paragraph
+        next unless paragraph.paragraph_style && paragraph.paragraph_style.named_style_type
+
+        style = paragraph.paragraph_style.named_style_type
+        if style.start_with?('HEADING_')
+          level = style.split('_').last.to_i
+          text = extract_paragraph_text(paragraph)
+          structure << {
+            level: level,
+            text: text,
+            start_index: element.start_index,
+            end_index: element.end_index
+          }
+        end
       end
+      structure
     end
 
-    output_json({
-      status: 'success',
-      operation: 'structure',
-      document_id: document.document_id,
-      title: document.title,
-      structure: structure
-    })
+    if tab_id
+      tab = tabs.find { |t| t.tab_properties&.tab_id == tab_id }
+      unless tab
+        output_json({
+          status: 'error',
+          error_code: 'TAB_NOT_FOUND',
+          operation: 'structure',
+          message: "Tab '#{tab_id}' not found. Available tabs: #{tabs.map { |t| { id: t.tab_properties&.tab_id, title: t.tab_properties&.title } }}"
+        })
+        exit EXIT_OPERATION_FAILED
+      end
+      structure = extract_structure.call(tab.document_tab.body.content)
+      output_json({
+        status: 'success',
+        operation: 'structure',
+        document_id: document.document_id,
+        title: document.title,
+        tab_id: tab.tab_properties&.tab_id,
+        tab_title: tab.tab_properties&.title,
+        structure: structure
+      })
+    elsif tabs.length > 1
+      tab_structures = tabs.map do |tab|
+        {
+          tab_id: tab.tab_properties&.tab_id,
+          tab_title: tab.tab_properties&.title,
+          structure: extract_structure.call(tab.document_tab.body.content)
+        }
+      end
+      output_json({
+        status: 'success',
+        operation: 'structure',
+        document_id: document.document_id,
+        title: document.title,
+        tab_count: tabs.length,
+        tabs: tab_structures
+      })
+    else
+      body_content = if tabs.any?
+                       tabs.first.document_tab.body.content
+                     else
+                       document.body&.content || []
+                     end
+      structure = extract_structure.call(body_content)
+      output_json({
+        status: 'success',
+        operation: 'structure',
+        document_id: document.document_id,
+        title: document.title,
+        structure: structure
+      })
+    end
   rescue Google::Apis::Error => e
     output_json({
       status: 'error',
@@ -197,11 +413,14 @@ class DocsManager
   end
 
   # Insert text at specific index
-  def insert_text(document_id:, text:, index: 1)
+  def insert_text(document_id:, text:, index: 1, tab_id: nil)
+    location = { index: index }
+    location[:tab_id] = tab_id if tab_id
+
     requests = [
       {
         insert_text: {
-          location: { index: index },
+          location: location,
           text: text
         }
       }
@@ -239,14 +458,23 @@ class DocsManager
   end
 
   # Append text to end of document
-  def append_text(document_id:, text:)
-    document = @docs_service.get_document(document_id)
-    end_index = document.body.content.last.end_index - 1
+  def append_text(document_id:, text:, tab_id: nil)
+    document = @docs_service.get_document(document_id, include_tabs_content: tab_id ? true : false)
+
+    end_index = if tab_id
+                  tab = find_tab(document, tab_id)
+                  tab&.document_tab&.body&.content&.last&.end_index.to_i - 1
+                else
+                  document.body.content.last.end_index - 1
+                end
+
+    location = { index: end_index }
+    location[:tab_id] = tab_id if tab_id
 
     requests = [
       {
         insert_text: {
-          location: { index: end_index },
+          location: location,
           text: text
         }
       }
@@ -331,19 +559,19 @@ class DocsManager
   end
 
   # Format text (bold, italic, underline)
-  def format_text(document_id:, start_index:, end_index:, bold: nil, italic: nil, underline: nil)
+  def format_text(document_id:, start_index:, end_index:, bold: nil, italic: nil, underline: nil, tab_id: nil)
     text_style = {}
     text_style[:bold] = bold unless bold.nil?
     text_style[:italic] = italic unless italic.nil?
     text_style[:underline] = underline unless underline.nil?
 
+    range_hash = { start_index: start_index, end_index: end_index }
+    range_hash[:tab_id] = tab_id if tab_id
+
     requests = [
       {
         update_text_style: {
-          range: {
-            start_index: start_index,
-            end_index: end_index
-          },
+          range: range_hash,
           text_style: text_style,
           fields: text_style.keys.join(',')
         }
@@ -381,11 +609,14 @@ class DocsManager
   end
 
   # Insert page break
-  def insert_page_break(document_id:, index:)
+  def insert_page_break(document_id:, index:, tab_id: nil)
+    location = { index: index }
+    location[:tab_id] = tab_id if tab_id
+
     requests = [
       {
         insert_page_break: {
-          location: { index: index }
+          location: location
         }
       }
     ]
@@ -420,7 +651,7 @@ class DocsManager
   end
 
   # Insert inline image from URL
-  def insert_image(document_id:, image_url:, index: nil, width: nil, height: nil)
+  def insert_image(document_id:, image_url:, index: nil, width: nil, height: nil, tab_id: nil)
     # If no index provided, append to end
     if index.nil?
       document = @docs_service.get_document(document_id)
@@ -432,9 +663,12 @@ class DocsManager
     object_size[:width] = { magnitude: width, unit: 'PT' } if width
     object_size[:height] = { magnitude: height, unit: 'PT' } if height
 
+    location = { index: index }
+    location[:tab_id] = tab_id if tab_id
+
     insert_request = {
       insert_inline_image: {
-        location: { index: index },
+        location: location,
         uri: image_url
       }
     }
@@ -519,6 +753,144 @@ class DocsManager
       error_code: 'CREATE_FAILED',
       operation: 'create',
       message: "Failed to create document: #{e.message}"
+    })
+    exit EXIT_OPERATION_FAILED
+  end
+
+  # Add a tab to an existing document
+  def add_tab(document_id:, title: nil, index: nil, parent_tab_id: nil)
+    tab_properties = {}
+    tab_properties[:title] = title if title
+    tab_properties[:index] = index if index
+    tab_properties[:parent_tab_id] = parent_tab_id if parent_tab_id
+
+    requests = [
+      {
+        add_document_tab: {
+          tab_properties: tab_properties
+        }
+      }
+    ]
+
+    result = @docs_service.batch_update_document(
+      document_id,
+      Google::Apis::DocsV1::BatchUpdateDocumentRequest.new(requests: requests)
+    )
+
+    new_tab = result.replies&.first&.add_document_tab
+    new_tab_id = new_tab&.tab&.tab_properties&.tab_id
+    new_tab_title = new_tab&.tab&.tab_properties&.title
+
+    output_json({
+      status: 'success',
+      operation: 'add_tab',
+      document_id: document_id,
+      tab_id: new_tab_id,
+      title: new_tab_title
+    })
+  rescue Google::Apis::Error => e
+    output_json({
+      status: 'error',
+      error_code: 'API_ERROR',
+      operation: 'add_tab',
+      message: "Google Docs API error: #{e.message}"
+    })
+    exit EXIT_API_ERROR
+  rescue StandardError => e
+    output_json({
+      status: 'error',
+      error_code: 'ADD_TAB_FAILED',
+      operation: 'add_tab',
+      message: "Failed to add tab: #{e.message}"
+    })
+    exit EXIT_OPERATION_FAILED
+  end
+
+  # Create document with multiple tabs, each with optional content
+  def create_with_tabs(title:, tabs:)
+    # Create the document
+    document = Google::Apis::DocsV1::Document.new(title: title)
+    result = @docs_service.create_document(document)
+    document_id = result.document_id
+
+    # Get the default first tab's ID
+    doc = @docs_service.get_document(document_id, include_tabs_content: true)
+    first_tab_id = doc.tabs&.first&.tab_properties&.tab_id
+
+    tab_results = []
+
+    # Rename first tab if title provided
+    first_tab = tabs[0]
+    if first_tab
+      if first_tab[:title]
+        rename_requests = [
+          {
+            update_document_tab: {
+              tab_properties: { tab_id: first_tab_id, title: first_tab[:title] },
+              fields: 'title'
+            }
+          }
+        ]
+        @docs_service.batch_update_document(
+          document_id,
+          Google::Apis::DocsV1::BatchUpdateDocumentRequest.new(requests: rename_requests)
+        )
+      end
+      tab_results << { tab_id: first_tab_id, title: first_tab[:title] || 'Tab 1' }
+    end
+
+    # Create additional tabs
+    tabs[1..].each do |tab_def|
+      add_requests = [
+        {
+          add_document_tab: {
+            tab_properties: tab_def[:title] ? { title: tab_def[:title] } : {}
+          }
+        }
+      ]
+      add_result = @docs_service.batch_update_document(
+        document_id,
+        Google::Apis::DocsV1::BatchUpdateDocumentRequest.new(requests: add_requests)
+      )
+      new_tab = add_result.replies&.first&.add_document_tab
+      new_tab_id = new_tab&.tab&.tab_properties&.tab_id
+      new_tab_title = new_tab&.tab&.tab_properties&.title
+      tab_results << { tab_id: new_tab_id, title: new_tab_title }
+    end
+
+    # Insert content into each tab
+    tabs.each_with_index do |tab_def, idx|
+      tab_id = tab_results[idx][:tab_id]
+      next unless tab_id
+
+      if tab_def[:markdown]
+        insert_content_to_tab(document_id: document_id, tab_id: tab_id, markdown: tab_def[:markdown])
+      elsif tab_def[:content]
+        insert_text_to_tab(document_id: document_id, tab_id: tab_id, text: tab_def[:content])
+      end
+    end
+
+    output_json({
+      status: 'success',
+      operation: 'create_with_tabs',
+      document_id: document_id,
+      title: title,
+      tabs: tab_results
+    })
+  rescue Google::Apis::Error => e
+    output_json({
+      status: 'error',
+      error_code: 'API_ERROR',
+      operation: 'create_with_tabs',
+      message: "Google Docs API error: #{e.message}"
+    })
+    exit EXIT_API_ERROR
+  rescue StandardError => e
+    output_json({
+      status: 'error',
+      error_code: 'CREATE_WITH_TABS_FAILED',
+      operation: 'create_with_tabs',
+      message: "Failed to create document with tabs: #{e.message}"
     })
     exit EXIT_OPERATION_FAILED
   end
@@ -816,11 +1188,16 @@ class DocsManager
   end
 
   # Insert markdown with proper formatting into existing document
-  def insert_from_markdown(document_id:, markdown:, index: nil)
+  def insert_from_markdown(document_id:, markdown:, index: nil, tab_id: nil)
     # If no index provided, append to end
     if index.nil?
-      document = @docs_service.get_document(document_id)
-      index = document.body.content.last.end_index - 1
+      document = @docs_service.get_document(document_id, include_tabs_content: tab_id ? true : false)
+      index = if tab_id
+                tab = find_tab(document, tab_id)
+                tab&.document_tab&.body&.content&.last&.end_index.to_i - 1
+              else
+                document.body.content.last.end_index - 1
+              end
     end
 
     # Parse markdown and build formatted content
@@ -828,11 +1205,14 @@ class DocsManager
 
     # Insert plain text first
     plain_text = parsed[:text]
+    location = { index: index }
+    location[:tab_id] = tab_id if tab_id
+
     unless plain_text.empty?
       insert_requests = [
         {
           insert_text: {
-            location: { index: index },
+            location: location,
             text: plain_text
           }
         }
@@ -892,7 +1272,93 @@ class DocsManager
     exit EXIT_OPERATION_FAILED
   end
 
+  # List all tabs in a document
+  def list_tabs(document_id:)
+    document = @docs_service.get_document(document_id, include_tabs_content: true)
+
+    tabs = flatten_tabs(document.tabs || [])
+    tab_info = tabs.map do |tab|
+      {
+        tab_id: tab.tab_properties&.tab_id,
+        title: tab.tab_properties&.title,
+        index: tab.tab_properties&.index
+      }
+    end
+
+    output_json({
+      status: 'success',
+      operation: 'list-tabs',
+      document_id: document.document_id,
+      title: document.title,
+      tab_count: tabs.length,
+      tabs: tab_info
+    })
+  rescue Google::Apis::Error => e
+    output_json({
+      status: 'error',
+      error_code: 'API_ERROR',
+      operation: 'list-tabs',
+      message: "Google Docs API error: #{e.message}",
+      details: e.body
+    })
+    exit EXIT_API_ERROR
+  end
+
   private
+
+  # Find a tab by ID in a document's tabs hierarchy
+  def find_tab(document, tab_id)
+    tabs = flatten_tabs(document.tabs || [])
+    tabs.find { |t| t.tab_properties&.tab_id == tab_id }
+  end
+
+  # Insert plain text into a specific tab at index 1
+  def insert_text_to_tab(document_id:, tab_id:, text:)
+    requests = [
+      {
+        insert_text: {
+          location: { index: 1, tab_id: tab_id },
+          text: text
+        }
+      }
+    ]
+    @docs_service.batch_update_document(
+      document_id,
+      Google::Apis::DocsV1::BatchUpdateDocumentRequest.new(requests: requests)
+    )
+  end
+
+  # Insert markdown content into a specific tab
+  def insert_content_to_tab(document_id:, tab_id:, markdown:)
+    parsed = parse_markdown(markdown)
+    plain_text = parsed[:text]
+
+    unless plain_text.empty?
+      insert_requests = [
+        {
+          insert_text: {
+            location: { index: 1, tab_id: tab_id },
+            text: plain_text
+          }
+        }
+      ]
+      @docs_service.batch_update_document(
+        document_id,
+        Google::Apis::DocsV1::BatchUpdateDocumentRequest.new(requests: insert_requests)
+      )
+    end
+
+    format_requests = parsed[:formats].reverse.map do |fmt|
+      build_format_request(fmt)
+    end.compact
+
+    unless format_requests.empty?
+      @docs_service.batch_update_document(
+        document_id,
+        Google::Apis::DocsV1::BatchUpdateDocumentRequest.new(requests: format_requests)
+      )
+    end
+  end
 
   # Parse markdown and return plain text with formatting info
   def parse_markdown(markdown)
@@ -1158,6 +1624,17 @@ class DocsManager
     rows.join("\n")
   end
 
+  # List all tabs in a document
+  # Flatten tabs tree (tabs can have child_tabs) into a flat array
+  def flatten_tabs(tabs)
+    result = []
+    tabs.each do |tab|
+      result << tab
+      result.concat(flatten_tabs(tab.child_tabs || []))
+    end
+    result
+  end
+
   # Output JSON to stdout
   def output_json(data)
     puts JSON.pretty_generate(data)
@@ -1283,21 +1760,28 @@ if __FILE__ == $PROGRAM_NAME
 
   command = ARGV[0]
 
-  # Handle auth command separately (doesn't require initialized service)
+  # Handle auth commands separately (doesn't require initialized service)
   if command == 'auth'
     if ARGV.length < 2
       puts JSON.pretty_generate({
         status: 'error',
         error_code: 'MISSING_CODE',
         message: 'Authorization code required',
-        usage: "#{File.basename($PROGRAM_NAME)} auth <code>"
+        usage: "#{File.basename($PROGRAM_NAME)} auth <code> [redirect_uri]"
       })
       exit DocsManager::EXIT_INVALID_ARGS
     end
 
     # Create temporary manager just for auth completion
     temp_manager = DocsManager.allocate
-    temp_manager.complete_auth(ARGV[1])
+    redirect_uri = ARGV[2]  # Optional redirect_uri
+    temp_manager.complete_auth(ARGV[1], redirect_uri)
+    exit DocsManager::EXIT_SUCCESS
+  end
+
+  if command == 'auth-listen'
+    port = ARGV.length >= 2 ? ARGV[1].to_i : DocsManager::DEFAULT_OAUTH_PORT
+    DocsManager.auth_listen(port)
     exit DocsManager::EXIT_SUCCESS
   end
 
@@ -1316,7 +1800,21 @@ if __FILE__ == $PROGRAM_NAME
       exit DocsManager::EXIT_INVALID_ARGS
     end
 
-    manager.read_document(document_id: ARGV[1])
+    tab_idx = ARGV.index('--tab')
+    tab_id = tab_idx ? ARGV[tab_idx + 1] : nil
+    manager.read_document(document_id: ARGV[1], tab_id: tab_id)
+
+  when 'list-tabs'
+    if ARGV.length < 2
+      puts JSON.pretty_generate({
+        status: 'error',
+        error_code: 'MISSING_DOCUMENT_ID',
+        message: 'Document ID required'
+      })
+      exit DocsManager::EXIT_INVALID_ARGS
+    end
+
+    manager.list_tabs(document_id: ARGV[1])
 
   when 'structure'
     if ARGV.length < 2
@@ -1328,7 +1826,9 @@ if __FILE__ == $PROGRAM_NAME
       exit DocsManager::EXIT_INVALID_ARGS
     end
 
-    manager.get_structure(document_id: ARGV[1])
+    tab_idx = ARGV.index('--tab')
+    tab_id = tab_idx ? ARGV[tab_idx + 1] : nil
+    manager.get_structure(document_id: ARGV[1], tab_id: tab_id)
 
   when 'insert'
     input = JSON.parse(STDIN.read, symbolize_names: true)
@@ -1345,7 +1845,8 @@ if __FILE__ == $PROGRAM_NAME
     manager.insert_text(
       document_id: input[:document_id],
       text: input[:text],
-      index: input[:index] || 1
+      index: input[:index] || 1,
+      tab_id: input[:tab_id]
     )
 
   when 'append'
@@ -1362,7 +1863,8 @@ if __FILE__ == $PROGRAM_NAME
 
     manager.append_text(
       document_id: input[:document_id],
-      text: input[:text]
+      text: input[:text],
+      tab_id: input[:tab_id]
     )
 
   when 'replace'
@@ -1471,7 +1973,44 @@ if __FILE__ == $PROGRAM_NAME
     manager.insert_from_markdown(
       document_id: input[:document_id],
       markdown: input[:markdown],
-      index: input[:index]
+      index: input[:index],
+      tab_id: input[:tab_id]
+    )
+
+  when 'add-tab'
+    input = JSON.parse(STDIN.read, symbolize_names: true)
+
+    unless input[:document_id]
+      puts JSON.pretty_generate({
+        status: 'error',
+        error_code: 'MISSING_REQUIRED_FIELDS',
+        message: 'Required field: document_id'
+      })
+      exit DocsManager::EXIT_INVALID_ARGS
+    end
+
+    manager.add_tab(
+      document_id: input[:document_id],
+      title: input[:title],
+      index: input[:index],
+      parent_tab_id: input[:parent_tab_id]
+    )
+
+  when 'create-with-tabs'
+    input = JSON.parse(STDIN.read, symbolize_names: true)
+
+    unless input[:title] && input[:tabs] && input[:tabs].is_a?(Array)
+      puts JSON.pretty_generate({
+        status: 'error',
+        error_code: 'MISSING_REQUIRED_FIELDS',
+        message: 'Required fields: title, tabs (array of {title, markdown/content})'
+      })
+      exit DocsManager::EXIT_INVALID_ARGS
+    end
+
+    manager.create_with_tabs(
+      title: input[:title],
+      tabs: input[:tabs]
     )
 
   when 'delete'
@@ -1537,7 +2076,7 @@ if __FILE__ == $PROGRAM_NAME
       status: 'error',
       error_code: 'INVALID_COMMAND',
       message: "Unknown command: #{command}",
-      valid_commands: ['auth', 'read', 'structure', 'insert', 'append', 'replace', 'format', 'page-break', 'create', 'create-from-markdown', 'insert-from-markdown', 'delete', 'insert-image']
+      valid_commands: ['auth', 'read', 'structure', 'list-tabs', 'insert', 'append', 'replace', 'format', 'page-break', 'create', 'create-from-markdown', 'create-with-tabs', 'insert-from-markdown', 'add-tab', 'delete', 'insert-image', 'insert-table']
     })
     usage
     exit DocsManager::EXIT_INVALID_ARGS

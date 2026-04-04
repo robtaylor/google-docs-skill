@@ -1,0 +1,2 @@
+#!/usr/bin/env -S uv run --project /Users/jinli/.claude/skills/google-docs/scripts
+from google_docs.setup import main; main()
