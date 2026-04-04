@@ -347,179 +347,126 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    """Entry point for the markdown-to-docs pipeline."""
+    """Entry point for the markdown-to-docs pipeline.
+
+    Uses Apps Script for ALL content insertion (text + formatting + images + tables)
+    in a single sequential pass. Images are inserted inline where they appear
+    in the markdown, not appended to the end.
+    """
+    from google_docs.markdown_to_blocks import markdown_to_blocks
+    from google_docs.appscript_builder import (
+        build_doc_from_blocks,
+        upload_image_to_drive,
+        _ensure_drive_folder,
+        _find_or_create_folder,
+    )
+    from google_docs.image_pipeline import render_mermaid, _resolve_file_path
+
     parser = _build_parser()
     args = parser.parse_args()
 
-    # Validate arguments
     if args.document_id is None and args.title is None:
         parser.error("Either --title (new doc) or --document-id (existing) is required")
 
     # 1. Read file
     file_path = Path(args.file).resolve()
     if not file_path.exists():
-        print(json.dumps({"status": "error", "error_code": "FILE_NOT_FOUND", "message": f"File not found: {args.file}"}))
+        print(json.dumps({"status": "error", "error_code": "FILE_NOT_FOUND",
+                          "message": f"File not found: {args.file}"}))
         sys.exit(1)
 
     content = file_path.read_text(encoding="utf-8")
     base_dir = str(file_path.parent)
+    doc_title = args.title or "untitled"
 
-    # 2. Parse markdown
-    parse_result = parse_markdown(content)
+    # 2. Parse markdown into blocks
+    blocks = markdown_to_blocks(content)
 
-    # 3. Dry run: output parse stats and exit
+    # 3. Dry run
     if args.dry_run:
-        output = {
-            "status": "dry_run",
-            "stats": {
-                "characters": len(parse_result.text),
-                "format_requests": len(parse_result.format_requests),
-                "images": len(parse_result.images),
-                "tables": len(parse_result.tables),
-            },
-        }
-        print(json.dumps(output, indent=2))
+        block_counts: dict[str, int] = {}
+        for b in blocks:
+            block_counts[b["type"]] = block_counts.get(b["type"], 0) + 1
+        print(json.dumps({"status": "dry_run", "blocks": len(blocks), "by_type": block_counts}, indent=2))
         return
 
-    # 4. Authenticate
+    # 4. Authenticate + create doc
+    from google_docs.auth import get_credentials, get_docs_service
+    from googleapiclient.discovery import build as api_build
+
+    creds = get_credentials()
     docs_service = get_docs_service()
+    drive = api_build("drive", "v3", credentials=creds)
 
-    # 5. Pre-process mermaid blocks to PNG (local rendering, no API calls)
-    mermaid_count = 0
-    image_files: list[dict] = []  # [{label, file_path}] for Apps Script insertion
-    if parse_result.images:
-        for img in parse_result.images:
-            if img.source_type == "mermaid":
-                import tempfile
-                tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-                tmp.close()
-                try:
-                    from google_docs.image_pipeline import render_mermaid
-                    render_mermaid(img.source, tmp.name)
-                    image_files.append({"label": img.alt_text or "Mermaid diagram", "file_path": tmp.name})
-                    mermaid_count += 1
-                except Exception as e:
-                    print(f"Warning: mermaid render failed: {e}", file=sys.stderr)
-            elif img.source_type == "file":
-                from google_docs.image_pipeline import _resolve_file_path
-                try:
-                    resolved = _resolve_file_path(img.source, base_dir)
-                    # Convert SVG to PNG if needed
-                    if resolved.lower().endswith(".svg"):
-                        png_path = resolved.rsplit(".", 1)[0] + ".png"
-                        if os.path.exists(png_path):
-                            resolved = png_path
-                        else:
-                            from google_docs.image_pipeline import _convert_svg_to_png
-                            _convert_svg_to_png(resolved, png_path)
-                            resolved = png_path
-                    if os.path.exists(resolved):
-                        image_files.append({"label": img.alt_text or img.source, "file_path": resolved})
-                except (ValueError, FileNotFoundError) as e:
-                    print(f"Warning: image skipped: {e}", file=sys.stderr)
-            elif img.source_type == "url":
-                pass  # URL images can't be inserted via Apps Script; skip
-
-    # 6. Create or get document FIRST (need doc to exist before any requests)
     if args.document_id:
         document_id = args.document_id
-        doc = _get_document(docs_service, document_id)
-        title = doc.get("title", "Untitled")
+        doc = docs_service.documents().get(documentId=document_id).execute()
+        doc_title = doc.get("title", doc_title)
     else:
-        doc = _create_document(docs_service, args.title)
+        doc = docs_service.documents().create(body={"title": doc_title}).execute()
         document_id = doc["documentId"]
-        title = args.title
 
-    rate_limiter = RateLimiter()
-    chunks_sent = 0
-    total_requests = 0
+    print(f"Doc: https://docs.google.com/document/d/{document_id}/edit")
 
-    # 7. Insert text FIRST (must exist before format requests can reference it)
-    insert_index = 1
-    if args.document_id:
-        insert_index = _get_end_index(doc, args.tab_id) - 1
-        if insert_index < 1:
-            insert_index = 1
+    # 5. Process images: render mermaid, resolve file paths, upload to Drive
+    image_blocks = [b for b in blocks if b["type"] == "image"]
+    drive_folder_id = args.drive_folder_id
 
-    if parse_result.text:
-        text_request = _build_insert_text_request(
-            parse_result.text, insert_index, args.tab_id
-        )
-        _batch_update_with_retry(
-            docs_service, document_id, [text_request], rate_limiter
-        )
-        chunks_sent += 1
-        total_requests += 1
+    if image_blocks:
+        if not drive_folder_id:
+            drive_folder_id = _ensure_drive_folder(drive, doc_title)
+        print(f"Uploading {len(image_blocks)} images to Drive...")
 
-    # 8. Apply format + image requests (text now exists in doc)
-    offset = insert_index - 1  # Shift parser indices if appending to existing doc
+        for i, block in enumerate(image_blocks):
+            src_type = block.get("source_type", "")
+            source = block.get("source", "")
 
-    format_requests = list(parse_result.format_requests)
-    if offset > 0:
-        format_requests = _offset_requests(format_requests, offset)
+            try:
+                if src_type == "mermaid":
+                    import tempfile
+                    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                    tmp.close()
+                    render_mermaid(source, tmp.name)
+                    file_id = upload_image_to_drive(drive, tmp.name, drive_folder_id)
+                    os.unlink(tmp.name)
+                    block["driveFileId"] = file_id
+                    print(f"  [{i+1}/{len(image_blocks)}] Mermaid → {file_id}")
 
-    def _get_request_index(req: dict) -> int:
-        """Extract the index from any request type for sorting."""
-        for action in req.values():
-            if isinstance(action, dict):
-                loc = action.get("location", {})
-                if "index" in loc:
-                    return loc["index"]
-                rng = action.get("range", {})
-                if "startIndex" in rng:
-                    return rng["startIndex"]
-        return 0
+                elif src_type == "file":
+                    resolved = _resolve_file_path(source, base_dir)
+                    if resolved.lower().endswith(".svg"):
+                        png = resolved.rsplit(".", 1)[0] + ".png"
+                        resolved = png if os.path.exists(png) else resolved
+                    if os.path.exists(resolved):
+                        file_id = upload_image_to_drive(drive, resolved, drive_folder_id)
+                        block["driveFileId"] = file_id
+                        print(f"  [{i+1}/{len(image_blocks)}] {Path(resolved).name} → {file_id}")
+                    else:
+                        print(f"  [{i+1}/{len(image_blocks)}] SKIP (missing): {source}", file=sys.stderr)
 
-    # Send format requests (these don't depend on external URLs)
-    format_requests = sorted(format_requests, key=_get_request_index, reverse=True)
+                elif src_type == "url":
+                    print(f"  [{i+1}/{len(image_blocks)}] SKIP (URL): {source}", file=sys.stderr)
 
-    for chunk in chunk_requests(format_requests):
-        _batch_update_with_retry(
-            docs_service, document_id, chunk, rate_limiter
-        )
-        chunks_sent += 1
+            except Exception as e:
+                print(f"  [{i+1}/{len(image_blocks)}] ERROR: {e}", file=sys.stderr)
 
-    total_requests += len(format_requests)
+    # 6. Build document via Apps Script (text + formatting + images, all in order)
+    def _progress(msg: str) -> None:
+        print(msg)
 
-    # Insert images via Apps Script (bypasses Docs API URL/size limits)
-    images_inserted = 0
-    images_failed = 0
-    if image_files:
-        from google_docs.image_inserter import insert_images_into_doc, _print_progress
-        img_result = insert_images_into_doc(
-            document_id=document_id,
-            images=image_files,
-            drive_folder_id=args.drive_folder_id,
-            doc_title=title,
-            on_progress=_print_progress,
-        )
-        images_inserted = img_result["inserted"]
-        images_failed = img_result["failed"]
+    stats = build_doc_from_blocks(
+        document_id=document_id,
+        blocks=blocks,
+        on_progress=_progress,
+    )
 
-    # 9. Insert tables AFTER text (reverse order, re-read between each)
-    tables_inserted = 0
-    if parse_result.tables:
-        tables_inserted = _insert_tables(
-            docs_service, document_id, parse_result.tables,
-            args.tab_id, rate_limiter,
-        )
-
-    # 10. Output result
+    # 7. Output result
     result = {
         "status": "success",
         "document_id": document_id,
-        "title": title,
+        "title": doc_title,
         "web_view_link": f"https://docs.google.com/document/d/{document_id}/edit",
-        "stats": {
-            "chunks_sent": chunks_sent,
-            "total_requests": total_requests,
-            "images_uploaded": images_inserted + images_failed,
-            "images_inserted": images_inserted,
-            "images_failed": images_failed,
-            "mermaid_rendered": mermaid_count,
-            "tables_inserted": tables_inserted,
-            "characters_inserted": len(parse_result.text),
-        },
+        "stats": stats,
     }
     print(json.dumps(result, indent=2))
 
