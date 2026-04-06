@@ -183,10 +183,142 @@ def _offset_format_request(req: dict[str, Any], offset: int) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Comment helpers
+# ---------------------------------------------------------------------------
+
+def _format_comment(comment: dict[str, Any]) -> dict[str, Any]:
+    """Format a Drive API comment into a consistent output dict."""
+    author = comment.get("author", {})
+    replies = [
+        {
+            "id": r.get("id"),
+            "content": r.get("content"),
+            "author": r.get("author", {}).get("displayName"),
+            "createdTime": r.get("createdTime"),
+        }
+        for r in comment.get("replies", [])
+    ]
+    return {
+        "id": comment.get("id"),
+        "content": comment.get("content"),
+        "author": author.get("displayName"),
+        "resolved": comment.get("resolved", False),
+        "replies": replies,
+        "quotedText": comment.get("quotedFileContent", {}).get("value"),
+        "createdTime": comment.get("createdTime"),
+    }
+
+
+def _fetch_comments(drive_service: Any, document_id: str) -> list[dict[str, Any]]:
+    """Fetch all comments for a document via Drive API."""
+    result = drive_service.comments().list(
+        fileId=document_id, fields="*"
+    ).execute()
+    return [_format_comment(c) for c in result.get("comments", [])]
+
+
+# ---------------------------------------------------------------------------
+# Comment commands
+# ---------------------------------------------------------------------------
+
+def cmd_list_comments(drive_service: Any, document_id: str) -> None:
+    """List all comments with replies."""
+    try:
+        comments = _fetch_comments(drive_service, document_id)
+        output_json({
+            "status": "success",
+            "operation": "list_comments",
+            "document_id": document_id,
+            "comments": comments,
+        })
+    except Exception as e:
+        _handle_error(e, "list_comments", "LIST_COMMENTS_FAILED", "Failed to list comments")
+
+
+def cmd_add_comment(drive_service: Any, document_id: str, content: str,
+                    quoted_text: str | None = None) -> None:
+    """Add a comment to a document."""
+    try:
+        body: dict[str, Any] = {"content": content}
+        if quoted_text is not None:
+            body["quotedFileContent"] = {"value": quoted_text, "mimeType": "text/plain"}
+        result = drive_service.comments().create(
+            fileId=document_id, body=body, fields="*"
+        ).execute()
+        output_json({
+            "status": "success",
+            "operation": "add_comment",
+            "document_id": document_id,
+            "comment": _format_comment(result),
+        })
+    except Exception as e:
+        _handle_error(e, "add_comment", "ADD_COMMENT_FAILED", "Failed to add comment")
+
+
+def cmd_reply_to_comment(drive_service: Any, document_id: str,
+                         comment_id: str, content: str) -> None:
+    """Reply to a comment."""
+    try:
+        result = drive_service.replies().create(
+            fileId=document_id, commentId=comment_id,
+            body={"content": content}, fields="*"
+        ).execute()
+        output_json({
+            "status": "success",
+            "operation": "reply_to_comment",
+            "document_id": document_id,
+            "comment_id": comment_id,
+            "reply": {
+                "id": result.get("id"),
+                "content": result.get("content"),
+                "author": result.get("author", {}).get("displayName"),
+                "createdTime": result.get("createdTime"),
+            },
+        })
+    except Exception as e:
+        _handle_error(e, "reply_to_comment", "REPLY_FAILED", "Failed to reply to comment")
+
+
+def cmd_resolve_comment(drive_service: Any, document_id: str, comment_id: str) -> None:
+    """Resolve a comment."""
+    try:
+        result = drive_service.comments().update(
+            fileId=document_id, commentId=comment_id,
+            body={"resolved": True}, fields="*"
+        ).execute()
+        output_json({
+            "status": "success",
+            "operation": "resolve_comment",
+            "document_id": document_id,
+            "comment_id": comment_id,
+            "resolved": result.get("resolved", True),
+        })
+    except Exception as e:
+        _handle_error(e, "resolve_comment", "RESOLVE_FAILED", "Failed to resolve comment")
+
+
+def cmd_delete_comment(drive_service: Any, document_id: str, comment_id: str) -> None:
+    """Delete a comment."""
+    try:
+        drive_service.comments().delete(
+            fileId=document_id, commentId=comment_id
+        ).execute()
+        output_json({
+            "status": "success",
+            "operation": "delete_comment",
+            "document_id": document_id,
+            "comment_id": comment_id,
+        })
+    except Exception as e:
+        _handle_error(e, "delete_comment", "DELETE_FAILED", "Failed to delete comment")
+
+
+# ---------------------------------------------------------------------------
 # Command implementations
 # ---------------------------------------------------------------------------
 
-def cmd_read(docs_service: Any, document_id: str, tab_id: str | None = None) -> None:
+def cmd_read(docs_service: Any, document_id: str, tab_id: str | None = None,
+             include_comments: bool = False) -> None:
     """Read document content."""
     try:
         document = docs_service.documents().get(
@@ -207,7 +339,7 @@ def cmd_read(docs_service: Any, document_id: str, tab_id: str | None = None) -> 
                 })
                 sys.exit(EXIT_OPERATION_FAILED)
             content = _extract_text_content(_get_body_content(tab))
-            output_json({
+            result: dict[str, Any] = {
                 "status": "success",
                 "operation": "read",
                 "document_id": document.get("documentId"),
@@ -216,7 +348,7 @@ def cmd_read(docs_service: Any, document_id: str, tab_id: str | None = None) -> 
                 "tab_title": _tab_title(tab),
                 "content": content,
                 "revision_id": document.get("revisionId"),
-            })
+            }
         elif len(tabs) > 1:
             tab_contents = [
                 {
@@ -226,7 +358,7 @@ def cmd_read(docs_service: Any, document_id: str, tab_id: str | None = None) -> 
                 }
                 for t in tabs
             ]
-            output_json({
+            result = {
                 "status": "success",
                 "operation": "read",
                 "document_id": document.get("documentId"),
@@ -234,21 +366,27 @@ def cmd_read(docs_service: Any, document_id: str, tab_id: str | None = None) -> 
                 "tab_count": len(tabs),
                 "tabs": tab_contents,
                 "revision_id": document.get("revisionId"),
-            })
+            }
         else:
             body_content = (
                 _get_body_content(tabs[0]) if tabs
                 else document.get("body", {}).get("content", [])
             )
             content = _extract_text_content(body_content)
-            output_json({
+            result = {
                 "status": "success",
                 "operation": "read",
                 "document_id": document.get("documentId"),
                 "title": document.get("title"),
                 "content": content,
                 "revision_id": document.get("revisionId"),
-            })
+            }
+
+        if include_comments:
+            drive_service = get_drive_service()
+            result["comments"] = _fetch_comments(drive_service, document_id)
+
+        output_json(result)
     except Exception as e:
         _handle_error(e, "read", "READ_FAILED", "Failed to read document")
 
@@ -583,17 +721,9 @@ def cmd_create_with_tabs(docs_service: Any, title: str, tabs_def: list[dict[str,
 
         tab_results: list[dict[str, Any]] = []
 
-        # Rename first tab if title provided
+        # Use the default first tab (the Docs API does not support renaming tabs)
         if tabs_def:
             first_def = tabs_def[0]
-            if first_def.get("title"):
-                rename_requests = [{
-                    "updateDocumentTab": {
-                        "tabProperties": {"tabId": first_tab_id, "title": first_def["title"]},
-                        "fields": "title",
-                    }
-                }]
-                _batch_update(docs_service, document_id, rename_requests)
             tab_results.append({
                 "tab_id": first_tab_id,
                 "title": first_def.get("title", "Tab 1"),
@@ -607,10 +737,8 @@ def cmd_create_with_tabs(docs_service: Any, title: str, tabs_def: list[dict[str,
             add_requests = [{"addDocumentTab": {"tabProperties": tab_props}}]
             add_result = _batch_update(docs_service, document_id, add_requests)
             replies = add_result.get("replies", [])
-            new_tab_data = (
-                replies[0].get("addDocumentTab", {}).get("tab", {}) if replies else {}
-            )
-            new_tp = new_tab_data.get("tabProperties", {})
+            add_tab_reply = replies[0].get("addDocumentTab", {}) if replies else {}
+            new_tp = add_tab_reply.get("tabProperties", {})
             tab_results.append({"tab_id": new_tp.get("tabId"), "title": new_tp.get("title")})
 
         # Insert content into each tab
@@ -713,8 +841,8 @@ def cmd_add_tab(docs_service: Any, document_id: str, title: str | None = None,
         result = _batch_update(docs_service, document_id, requests)
 
         replies = result.get("replies", [])
-        new_tab_data = replies[0].get("addDocumentTab", {}).get("tab", {}) if replies else {}
-        new_tp = new_tab_data.get("tabProperties", {})
+        add_tab_reply = replies[0].get("addDocumentTab", {}) if replies else {}
+        new_tp = add_tab_reply.get("tabProperties", {})
 
         output_json({
             "status": "success",
@@ -753,8 +881,15 @@ def cmd_insert_image(docs_service: Any, document_id: str, image_url: str,
     """Insert inline image from URL."""
     try:
         if index is None:
-            document = docs_service.documents().get(documentId=document_id).execute()
-            body_content = document.get("body", {}).get("content", [])
+            document = docs_service.documents().get(
+                documentId=document_id, includeTabsContent=bool(tab_id),
+            ).execute()
+            if tab_id:
+                tabs = flatten_tabs(document.get("tabs", []))
+                tab = _find_tab(tabs, tab_id)
+                body_content = _get_body_content(tab) if tab else []
+            else:
+                body_content = document.get("body", {}).get("content", [])
             index = body_content[-1].get("endIndex", 2) - 1 if body_content else 1
 
         location: dict[str, Any] = {"index": index}
@@ -934,6 +1069,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_read = subparsers.add_parser("read", help="Read document content")
     p_read.add_argument("document_id")
     p_read.add_argument("--tab", dest="tab_id", default=None)
+    p_read.add_argument("--include-comments", action="store_true", default=False)
 
     # structure <document_id> [--tab TAB_ID]
     p_struct = subparsers.add_parser("structure", help="Get document structure (headings)")
@@ -944,8 +1080,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_lt = subparsers.add_parser("list-tabs", help="List all tabs in a document")
     p_lt.add_argument("document_id")
 
+    # list-comments <document_id>
+    p_lc = subparsers.add_parser("list-comments", help="List all comments with replies")
+    p_lc.add_argument("document_id")
+
     # stdin-based commands
     for name, help_text in [
+        ("add-comment", "Add a comment to a document (JSON via stdin)"),
+        ("reply-to-comment", "Reply to a comment (JSON via stdin)"),
+        ("resolve-comment", "Resolve a comment (JSON via stdin)"),
+        ("delete-comment", "Delete a comment (JSON via stdin)"),
         ("insert", "Insert text at specific index (JSON via stdin)"),
         ("append", "Append text to end of document (JSON via stdin)"),
         ("replace", "Find and replace text (JSON via stdin)"),
@@ -975,10 +1119,12 @@ def main() -> None:
         sys.exit(EXIT_INVALID_ARGS)
 
     docs_service = get_docs_service()
+    drive_service = get_drive_service()
     command = args.command
 
     if command == "read":
-        cmd_read(docs_service, args.document_id, tab_id=args.tab_id)
+        cmd_read(docs_service, args.document_id, tab_id=args.tab_id,
+                 include_comments=args.include_comments)
 
     elif command == "structure":
         cmd_structure(docs_service, args.document_id, tab_id=args.tab_id)
@@ -1069,6 +1215,31 @@ def main() -> None:
         cmd_insert_table(docs_service, data["document_id"], data["rows"], data["cols"],
                          index=data.get("index"), data=data.get("data"))
 
+    elif command == "list-comments":
+        cmd_list_comments(drive_service, args.document_id)
+
+    elif command == "add-comment":
+        data = _read_stdin_json()
+        _validate_fields(data, ["document_id", "content"])
+        cmd_add_comment(drive_service, data["document_id"], data["content"],
+                        quoted_text=data.get("quotedText"))
+
+    elif command == "reply-to-comment":
+        data = _read_stdin_json()
+        _validate_fields(data, ["document_id", "comment_id", "content"])
+        cmd_reply_to_comment(drive_service, data["document_id"],
+                             data["comment_id"], data["content"])
+
+    elif command == "resolve-comment":
+        data = _read_stdin_json()
+        _validate_fields(data, ["document_id", "comment_id"])
+        cmd_resolve_comment(drive_service, data["document_id"], data["comment_id"])
+
+    elif command == "delete-comment":
+        data = _read_stdin_json()
+        _validate_fields(data, ["document_id", "comment_id"])
+        cmd_delete_comment(drive_service, data["document_id"], data["comment_id"])
+
     else:
         output_json({
             "status": "error",
@@ -1078,7 +1249,8 @@ def main() -> None:
                 "read", "structure", "list-tabs", "insert", "append", "replace",
                 "format", "page-break", "create", "create-from-markdown",
                 "create-with-tabs", "insert-from-markdown", "add-tab", "delete",
-                "insert-image", "insert-table",
+                "insert-image", "insert-table", "list-comments", "add-comment",
+                "reply-to-comment", "resolve-comment", "delete-comment",
             ],
         })
         sys.exit(EXIT_INVALID_ARGS)
