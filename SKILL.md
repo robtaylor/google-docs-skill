@@ -1,11 +1,13 @@
 ---
 name: google-docs
 description: Manage Google Docs and Google Drive with full document operations and file management. Includes Markdown support for creating formatted documents with headings, bold, italic, lists, tables, and checkboxes. Also supports Drive operations (upload, download, share, search).
-category: productivity
-version: 1.2.0
-key_capabilities: create-from-markdown, insert-from-markdown, tables, formatted text, Drive upload/download/share/search
-when_to_use: Document content operations, formatted document creation from Markdown, tables, Drive file management, sharing files
+when_to_use: Document content operations, formatted document creation from Markdown, tables, Drive file management, sharing files. Keywords - Google Doc, document, edit doc, format text, insert text, Drive upload, share file.
+allowed-tools: Read, Bash(scripts/docs_manager.rb:*), Bash(scripts/drive_manager.rb:*)
 ---
+
+<!-- Skill version: 1.3.0 — see Version History section at the end of this file. -->
+<!-- Frontmatter follows the Agent Skills standard (https://agentskills.io): only
+     name, description, when_to_use, and allowed-tools are recognized fields. -->
 
 # Google Docs & Drive Management Skill
 
@@ -785,6 +787,7 @@ echo '{"document_id":"abc123","image_url":"https://example.com/image.png"}' | sc
 
 ## Version History
 
+- **1.3.0** (2026-07-01) - Modernized SKILL.md frontmatter to the [Agent Skills](https://agentskills.io) standard (removed non-standard `category`/`version`/`key_capabilities` fields; added `allowed-tools`; folded keywords into `when_to_use`). Fixed `insert-table` missing from `docs_manager.rb` help text and error list. Verified all operations against current Google API gems (docs_v1 0.39.0, drive_v3 0.75.0, googleauth 1.16.0).
 - **1.2.0** (2025-12-25) - Added markdown support documentation: `create-from-markdown`, `insert-from-markdown`, `insert-table` commands. Supports headings, bold, italic, code, lists, checkboxes, tables, and horizontal rules.
 - **1.1.0** (2025-12-20) - Added Google Drive operations via drive_manager.rb: upload, download, search, list, share, move, copy, delete, folder management. Integrated with excalidraw-diagrams skill for diagram workflows.
 - **1.0.0** (2025-11-10) - Initial Google Docs skill with full document operations: read, create, insert, append, replace, format, page breaks, structure analysis. Shared OAuth token with email, calendar, contacts, drive, and sheets skills.

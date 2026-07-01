@@ -1187,6 +1187,7 @@ def usage
       insert-from-markdown     Insert formatted markdown into existing doc (JSON via stdin)
       delete                   Delete content range (JSON via stdin)
       insert-image             Insert inline image from URL (JSON via stdin)
+      insert-table             Insert table with optional data (JSON via stdin)
 
     JSON Input Formats:
 
@@ -1537,7 +1538,7 @@ if __FILE__ == $PROGRAM_NAME
       status: 'error',
       error_code: 'INVALID_COMMAND',
       message: "Unknown command: #{command}",
-      valid_commands: ['auth', 'read', 'structure', 'insert', 'append', 'replace', 'format', 'page-break', 'create', 'create-from-markdown', 'insert-from-markdown', 'delete', 'insert-image']
+      valid_commands: ['auth', 'read', 'structure', 'insert', 'append', 'replace', 'format', 'page-break', 'create', 'create-from-markdown', 'insert-from-markdown', 'delete', 'insert-image', 'insert-table']
     })
     usage
     exit DocsManager::EXIT_INVALID_ARGS
