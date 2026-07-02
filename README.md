@@ -1,3 +1,20 @@
+> [!WARNING]
+> ## ⚠️ Archived — use [google-workspace](https://github.com/andmarios/google-workspace-skill) instead
+>
+> This skill is **no longer maintained**. [`andmarios/google-workspace-skill`](https://github.com/andmarios/google-workspace-skill)
+> is a strict superset: it covers every Docs and Drive operation here, plus Sheets,
+> Slides, Gmail, Calendar, and Contacts (239 operations across 8 services), with
+> encrypted token storage, multi-account support, prompt-injection screening, and a
+> test suite. It installs as a `uvx gws-cli` tool.
+>
+> ```bash
+> git clone https://github.com/andmarios/google-workspace-skill ~/.claude/skills/google-workspace
+> ```
+>
+> The content below is retained for historical reference only.
+
+---
+
 # Google Docs Skill for Claude Code
 
 A Claude Code skill for managing Google Docs and Google Drive with comprehensive document and file operations.
